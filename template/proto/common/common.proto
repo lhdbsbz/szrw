@@ -7,3 +7,25 @@ option go_package = "github.com/lhdbsbz/szrw-template/gen/proto/common";
 // 不要用 google.protobuf.Empty：本地这份让前端类型生成、int64 处理、JSON 名称
 // 都由同一个 proto 决定，少一个外部依赖。
 message Empty {}
+
+// 分页方式枚举
+enum PageBy {
+  PAGE_BY_PAGE = 0;  // 通过分页
+  PAGE_BY_BATCH = 1; // 通过批次
+}
+
+// 分页请求参数
+message PageInfoReq {
+  PageBy pageBy = 1; // 分页方式 pageBy=BATCH时填写batchId+size pageBy=PAGE时填写pageNum+size
+  int64 batchId = 2; // 批次号
+  int64 pageNum = 3; // 页码
+  int64 size = 4;     // 数量
+}
+
+// 分页响应信息
+message PageInfoResp {
+  PageBy pageBy = 1; // 分页方式 pageBy=BATCH时返回batchId pageBy=PAGE时返回pageNum+total
+  int64 batchId = 2; // 批次号
+  int64 pageNum = 3; // 页码
+  int64 total = 4;    // 数据总条数
+}

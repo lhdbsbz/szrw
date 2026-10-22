@@ -41,7 +41,9 @@ proto 契约规则住在生成器里（缺省开启，没有开关），
 | `google.api.http` 必须等于 `<http_route_prefix>/{Service}/{Rpc}` | 生成器 |
 | 整数字段只能是 `int64`（JSON 里才会统一是字符串） | 生成器 |
 
-项目特有的约定（`*Id` 命名、分页 DTO、某客户端字段冻结）才需要自己写测试。
+项目特有的约定（`*Id` 命名、分页 DTO、某客户端字段冻结）才需要自己写测试：
+放在 `contracts/`，`go test ./contracts` 跑（框架 §9 的验收项之一）。
+模板自带一条「proto 实体 ID 只能是 int64」；怎么加自己的见 `contracts/README.md`。
 
 ## 生成
 
@@ -129,6 +131,7 @@ proto/                契约（common + greeter：{dir}.proto 写接口，{dir}_
 proto_third/          protoc 需要的第三方 proto（google/api）
 gen/                  生成物，可整体删除重建
 microservice/greeter/ 实现：rpc.go + 一 rpc 一个文件
+contracts/            项目自己的口径守卫（生成器拦不住的约定）
 pkg/                  本项目的运行时扩展点（框架不提供）
 scripts/              生成脚本
 main.go               装配入口

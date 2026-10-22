@@ -21,6 +21,53 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+// 分页方式枚举
+type PageBy int32
+
+const (
+	PageBy_PAGE_BY_PAGE  PageBy = 0 // 通过分页
+	PageBy_PAGE_BY_BATCH PageBy = 1 // 通过批次
+)
+
+// Enum value maps for PageBy.
+var (
+	PageBy_name = map[int32]string{
+		0: "PAGE_BY_PAGE",
+		1: "PAGE_BY_BATCH",
+	}
+	PageBy_value = map[string]int32{
+		"PAGE_BY_PAGE":  0,
+		"PAGE_BY_BATCH": 1,
+	}
+)
+
+func (x PageBy) Enum() *PageBy {
+	p := new(PageBy)
+	*p = x
+	return p
+}
+
+func (x PageBy) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (PageBy) Descriptor() protoreflect.EnumDescriptor {
+	return file_proto_common_common_proto_enumTypes[0].Descriptor()
+}
+
+func (PageBy) Type() protoreflect.EnumType {
+	return &file_proto_common_common_proto_enumTypes[0]
+}
+
+func (x PageBy) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use PageBy.Descriptor instead.
+func (PageBy) EnumDescriptor() ([]byte, []int) {
+	return file_proto_common_common_proto_rawDescGZIP(), []int{0}
+}
+
 // Empty 是「无参数」或「无返回值」的占位消息。
 // 不要用 google.protobuf.Empty：本地这份让前端类型生成、int64 处理、JSON 名称
 // 都由同一个 proto 决定，少一个外部依赖。
@@ -60,12 +107,163 @@ func (*Empty) Descriptor() ([]byte, []int) {
 	return file_proto_common_common_proto_rawDescGZIP(), []int{0}
 }
 
+// 分页请求参数
+type PageInfoReq struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	PageBy        PageBy                 `protobuf:"varint,1,opt,name=pageBy,proto3,enum=proto.common.PageBy" json:"pageBy,omitempty"` // 分页方式 pageBy=BATCH时填写batchId+size pageBy=PAGE时填写pageNum+size
+	BatchId       int64                  `protobuf:"varint,2,opt,name=batchId,proto3" json:"batchId,omitempty"`                        // 批次号
+	PageNum       int64                  `protobuf:"varint,3,opt,name=pageNum,proto3" json:"pageNum,omitempty"`                        // 页码
+	Size          int64                  `protobuf:"varint,4,opt,name=size,proto3" json:"size,omitempty"`                              // 数量
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PageInfoReq) Reset() {
+	*x = PageInfoReq{}
+	mi := &file_proto_common_common_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PageInfoReq) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PageInfoReq) ProtoMessage() {}
+
+func (x *PageInfoReq) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_common_common_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PageInfoReq.ProtoReflect.Descriptor instead.
+func (*PageInfoReq) Descriptor() ([]byte, []int) {
+	return file_proto_common_common_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *PageInfoReq) GetPageBy() PageBy {
+	if x != nil {
+		return x.PageBy
+	}
+	return PageBy_PAGE_BY_PAGE
+}
+
+func (x *PageInfoReq) GetBatchId() int64 {
+	if x != nil {
+		return x.BatchId
+	}
+	return 0
+}
+
+func (x *PageInfoReq) GetPageNum() int64 {
+	if x != nil {
+		return x.PageNum
+	}
+	return 0
+}
+
+func (x *PageInfoReq) GetSize() int64 {
+	if x != nil {
+		return x.Size
+	}
+	return 0
+}
+
+// 分页响应信息
+type PageInfoResp struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	PageBy        PageBy                 `protobuf:"varint,1,opt,name=pageBy,proto3,enum=proto.common.PageBy" json:"pageBy,omitempty"` // 分页方式 pageBy=BATCH时返回batchId pageBy=PAGE时返回pageNum+total
+	BatchId       int64                  `protobuf:"varint,2,opt,name=batchId,proto3" json:"batchId,omitempty"`                        // 批次号
+	PageNum       int64                  `protobuf:"varint,3,opt,name=pageNum,proto3" json:"pageNum,omitempty"`                        // 页码
+	Total         int64                  `protobuf:"varint,4,opt,name=total,proto3" json:"total,omitempty"`                            // 数据总条数
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PageInfoResp) Reset() {
+	*x = PageInfoResp{}
+	mi := &file_proto_common_common_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PageInfoResp) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PageInfoResp) ProtoMessage() {}
+
+func (x *PageInfoResp) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_common_common_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PageInfoResp.ProtoReflect.Descriptor instead.
+func (*PageInfoResp) Descriptor() ([]byte, []int) {
+	return file_proto_common_common_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *PageInfoResp) GetPageBy() PageBy {
+	if x != nil {
+		return x.PageBy
+	}
+	return PageBy_PAGE_BY_PAGE
+}
+
+func (x *PageInfoResp) GetBatchId() int64 {
+	if x != nil {
+		return x.BatchId
+	}
+	return 0
+}
+
+func (x *PageInfoResp) GetPageNum() int64 {
+	if x != nil {
+		return x.PageNum
+	}
+	return 0
+}
+
+func (x *PageInfoResp) GetTotal() int64 {
+	if x != nil {
+		return x.Total
+	}
+	return 0
+}
+
 var File_proto_common_common_proto protoreflect.FileDescriptor
 
 const file_proto_common_common_proto_rawDesc = "" +
 	"\n" +
 	"\x19proto/common/common.proto\x12\fproto.common\"\a\n" +
-	"\x05EmptyB3Z1github.com/lhdbsbz/szrw-template/gen/proto/commonb\x06proto3"
+	"\x05Empty\"\x83\x01\n" +
+	"\vPageInfoReq\x12,\n" +
+	"\x06pageBy\x18\x01 \x01(\x0e2\x14.proto.common.PageByR\x06pageBy\x12\x18\n" +
+	"\abatchId\x18\x02 \x01(\x03R\abatchId\x12\x18\n" +
+	"\apageNum\x18\x03 \x01(\x03R\apageNum\x12\x12\n" +
+	"\x04size\x18\x04 \x01(\x03R\x04size\"\x86\x01\n" +
+	"\fPageInfoResp\x12,\n" +
+	"\x06pageBy\x18\x01 \x01(\x0e2\x14.proto.common.PageByR\x06pageBy\x12\x18\n" +
+	"\abatchId\x18\x02 \x01(\x03R\abatchId\x12\x18\n" +
+	"\apageNum\x18\x03 \x01(\x03R\apageNum\x12\x14\n" +
+	"\x05total\x18\x04 \x01(\x03R\x05total*-\n" +
+	"\x06PageBy\x12\x10\n" +
+	"\fPAGE_BY_PAGE\x10\x00\x12\x11\n" +
+	"\rPAGE_BY_BATCH\x10\x01B3Z1github.com/lhdbsbz/szrw-template/gen/proto/commonb\x06proto3"
 
 var (
 	file_proto_common_common_proto_rawDescOnce sync.Once
@@ -79,16 +277,22 @@ func file_proto_common_common_proto_rawDescGZIP() []byte {
 	return file_proto_common_common_proto_rawDescData
 }
 
-var file_proto_common_common_proto_msgTypes = make([]protoimpl.MessageInfo, 1)
+var file_proto_common_common_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
+var file_proto_common_common_proto_msgTypes = make([]protoimpl.MessageInfo, 3)
 var file_proto_common_common_proto_goTypes = []any{
-	(*Empty)(nil), // 0: proto.common.Empty
+	(PageBy)(0),          // 0: proto.common.PageBy
+	(*Empty)(nil),        // 1: proto.common.Empty
+	(*PageInfoReq)(nil),  // 2: proto.common.PageInfoReq
+	(*PageInfoResp)(nil), // 3: proto.common.PageInfoResp
 }
 var file_proto_common_common_proto_depIdxs = []int32{
-	0, // [0:0] is the sub-list for method output_type
-	0, // [0:0] is the sub-list for method input_type
-	0, // [0:0] is the sub-list for extension type_name
-	0, // [0:0] is the sub-list for extension extendee
-	0, // [0:0] is the sub-list for field type_name
+	0, // 0: proto.common.PageInfoReq.pageBy:type_name -> proto.common.PageBy
+	0, // 1: proto.common.PageInfoResp.pageBy:type_name -> proto.common.PageBy
+	2, // [2:2] is the sub-list for method output_type
+	2, // [2:2] is the sub-list for method input_type
+	2, // [2:2] is the sub-list for extension type_name
+	2, // [2:2] is the sub-list for extension extendee
+	0, // [0:2] is the sub-list for field type_name
 }
 
 func init() { file_proto_common_common_proto_init() }
@@ -101,13 +305,14 @@ func file_proto_common_common_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_common_common_proto_rawDesc), len(file_proto_common_common_proto_rawDesc)),
-			NumEnums:      0,
-			NumMessages:   1,
+			NumEnums:      1,
+			NumMessages:   3,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
 		GoTypes:           file_proto_common_common_proto_goTypes,
 		DependencyIndexes: file_proto_common_common_proto_depIdxs,
+		EnumInfos:         file_proto_common_common_proto_enumTypes,
 		MessageInfos:      file_proto_common_common_proto_msgTypes,
 	}.Build()
 	File_proto_common_common_proto = out.File

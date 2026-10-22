@@ -144,7 +144,7 @@ microservice/<域>/   var Service + Main(ctx, start) + 一 rpc 一个文件
 
 约定（生成器不查，靠 review 与项目守卫）：
 
-- 消息名 `<Rpc>Req` / `<Rpc>Resp`；空请求响应用 `common.Empty`；列表用 `common.PageInfoReq` / `common.PageInfoResp`（消息本身由项目的 `proto/common/common.proto` 声明，框架只规定名字与形状）。
+- 消息名 `<Rpc>Req` / `<Rpc>Resp`；空请求响应用 `common.Empty`；列表用 `common.PageInfoReq` / `common.PageInfoResp`（字段名、枚举值与注释以模板的 `proto/common/common.proto` 为准，新项目直接复制；框架只规定名字与形状，不生成这两个消息）。
 - HTTP 注解一律 `post:` + `body: "*"`（生成器只校验路径；方法与 body 是约定）。
 - 后台接口用 `Admin` 前缀；SSE 仅限 `server-streaming` + `google.api.http`。
 - `go_package` 必须是 `<module>/gen/proto/<相对路径>`，否则生成器无法推导实现目录。

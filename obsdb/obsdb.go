@@ -22,6 +22,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	_ "modernc.org/sqlite" // 纯 Go 驱动，可交叉编译（cgo 版不行）
@@ -36,6 +37,8 @@ CREATE TABLE IF NOT EXISTS span(
  status TEXT NOT NULL DEFAULT '', status_code TEXT NOT NULL DEFAULT '', error_msg TEXT NOT NULL DEFAULT '',
  start_ns INTEGER NOT NULL, end_ns INTEGER NOT NULL, attrs TEXT NOT NULL DEFAULT '{}');
 CREATE INDEX IF NOT EXISTS idx_span_trace ON span(trace_id, start_ns);
+CREATE INDEX IF NOT EXISTS idx_span_start ON span(start_ns);
+CREATE INDEX IF NOT EXISTS idx_span_root ON span(parent_span_id, start_ns);
 
 CREATE TABLE IF NOT EXISTS log(
  id INTEGER PRIMARY KEY AUTOINCREMENT, ts_ns INTEGER NOT NULL, level TEXT NOT NULL DEFAULT '',
@@ -65,6 +68,11 @@ type Store struct {
 
 	queue chan entry
 	wg    sync.WaitGroup
+
+	// 已写入的总条数（只增不减：轮转删掉旧文件也不回退），查询页的「本轮数据」用它，
+	// 避免每次刷新都对大表做 COUNT(*)。
+	writtenLogs  atomic.Int64
+	writtenSpans atomic.Int64
 }
 
 // dbFile 是本次运行里的一个库文件。
@@ -296,14 +304,17 @@ func (s *Store) flush(batch []entry) {
 		_ = tx.Rollback()
 		return
 	}
+	var nSpans, nLogs int64
 	for _, e := range batch {
 		if e.span != nil {
+			nSpans++
 			attrs, _ := json.Marshal(e.span.Attrs)
 			_, _ = spanStmt.Exec(e.span.TraceID, e.span.SpanID, e.span.ParentSpanID, e.span.Name,
 				e.span.Service, e.span.Protocol, e.span.Status, e.span.StatusCode, e.span.ErrorMsg,
 				e.span.StartNS, e.span.EndNS, string(attrs))
 		}
 		if e.log != nil {
+			nLogs++
 			attrs, _ := json.Marshal(e.log.Attrs)
 			_, _ = logStmt.Exec(e.log.TimeNS, e.log.Level, e.log.Msg, e.log.Caller,
 				e.log.TraceID, e.log.SpanID, e.log.ParentSpanID, string(attrs))
@@ -311,7 +322,11 @@ func (s *Store) flush(batch []entry) {
 	}
 	_ = spanStmt.Close()
 	_ = logStmt.Close()
-	_ = tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return
+	}
+	s.writtenSpans.Add(nSpans)
+	s.writtenLogs.Add(nLogs)
 
 	// 写完再看体积：到顶就换新库（本轮最多 keep 个，第 4 个删第 1 个）。
 	if info, err := os.Stat(cur.path); err == nil && info.Size() >= s.maxBytes {
@@ -446,80 +461,12 @@ func removeDBFiles(path string) {
 	_ = os.Remove(path + "-shm")
 }
 
-// RecentTrace 是「最近请求」列表的一行（按 trace 聚合，不必先知道 trace id）。
-type RecentTrace struct {
-	TraceID   string
-	Entry     string
-	Status    string
-	StartNS   int64
-	EndNS     int64
-	SpanCount int64
-	LogCount  int64
-}
-
-// RecentTraces 返回最近的请求，按开始时间倒序（跨本轮所有库文件合并）。
-func (s *Store) RecentTraces(ctx context.Context, limit int) ([]RecentTrace, error) {
-	if limit <= 0 {
-		limit = 50
-	}
-	var out []RecentTrace
-	for _, f := range s.all() {
-		rows, err := f.db.QueryContext(ctx, `SELECT trace_id, MIN(start_ns), MAX(end_ns), COUNT(*)
-			FROM span GROUP BY trace_id ORDER BY MIN(start_ns) DESC LIMIT ?`, limit)
-		if err != nil {
-			return nil, err
-		}
-		for rows.Next() {
-			var t RecentTrace
-			if err := rows.Scan(&t.TraceID, &t.StartNS, &t.EndNS, &t.SpanCount); err != nil {
-				_ = rows.Close()
-				return nil, err
-			}
-			out = append(out, t)
-		}
-		_ = rows.Close()
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].StartNS > out[j].StartNS })
-	if len(out) > limit {
-		out = out[:limit]
-	}
-
-	// 补入口与状态：根 span 就是入口（进程内调用不产生 client span，所以只有一个根）。
-	for i := range out {
-		for _, f := range s.all() {
-			var name, st string
-			err := f.db.QueryRowContext(ctx, `SELECT name, status FROM span
-				WHERE trace_id = ? AND parent_span_id = '' LIMIT 1`, out[i].TraceID).Scan(&name, &st)
-			if err == nil {
-				out[i].Entry, out[i].Status = name, st
-				break
-			}
-		}
-		var logs int64
-		for _, f := range s.all() {
-			var n int64
-			_ = f.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM log WHERE trace_id = ?`, out[i].TraceID).Scan(&n)
-			logs += n
-		}
-		out[i].LogCount = logs
-	}
-	return out, nil
-}
-
 // Counts 返回本轮已写入的日志与 span 总数。
-func (s *Store) Counts(ctx context.Context) (logs, spans int64, err error) {
-	for _, f := range s.all() {
-		var l, sp int64
-		if e := f.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM log`).Scan(&l); e != nil {
-			return 0, 0, e
-		}
-		if e := f.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM span`).Scan(&sp); e != nil {
-			return 0, 0, e
-		}
-		logs += l
-		spans += sp
-	}
-	return logs, spans, nil
+//
+// 用计数器而不是 COUNT(*)：概览页 5s 刷一次，对 1.5GB 的观测库反复数全表
+// 会把「看板」变成负载来源。轮转删掉旧文件后计数不回退，它表示「这次运行写了多少」。
+func (s *Store) Counts(_ context.Context) (logs, spans int64, err error) {
+	return s.writtenLogs.Load(), s.writtenSpans.Load(), nil
 }
 
 // Dir 返回观测库目录。

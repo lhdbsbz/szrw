@@ -21,7 +21,7 @@ curl -X POST localhost:8080/grpc-gateway/GreeterService/SayHello -d '{"name":"sz
 - **不要手写 `microservice/<域>/rpc.go` 和 `<rpc_snake>.go`**：`--scaffold` 会补，而且一 rpc 一文件的规则由生成器强制。
 - **运行时契约在 `szrw`**（普通模块依赖；本地由工作区 `go.work` 指向工作副本，CI 用 `go.mod` 的伪版本）：本仓不提供 `core`，也不要自己实现拦截器。
 - `proto_third/google/api/*.proto` 是 protoc 的 include 依赖，升级 grpc-gateway 时一起换。
-- **校验不要再写脚本**：proto 契约规则（布局/import 方向/HTTP 路由/整数宽度）由生成器的 validate 负责，这个仓不该出现校验 bash/脚本。项目特有的命名约定才写测试。
+- **校验不要再写脚本**：proto 契约规则（布局/import 方向/HTTP 路由/整数宽度）由生成器的 validate 负责，这个仓不该出现校验 bash/脚本。项目特有的命名约定才写测试，放 `contracts/`（`go test ./contracts`），模板自带一条 ID 口径守卫。
 - 生成失败时 `gen/` 会被自动还原（先挪到 `gen.prev` 再生成），所以坏 proto 不会把仓删空。
 - **改这个模板之前先问**：它是「最小」模板，不是另一个产品。加能力要能回答「新项目真的需要它吗」。
 - `scripts/gen.ps1` 必须是 **UTF-8 with BOM**：PowerShell 5.1 按 ANSI 解码无 BOM 的中文注释会解析失败。

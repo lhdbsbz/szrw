@@ -10,6 +10,7 @@ import (
 
 	"github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
 
+	"github.com/lhdbsbz/szrw-template/gen/wiring"
 	"github.com/lhdbsbz/szrw/core"
 	"github.com/lhdbsbz/szrw/gateway"
 	"github.com/lhdbsbz/szrw/health"
@@ -17,7 +18,6 @@ import (
 	"github.com/lhdbsbz/szrw/obsdb"
 	"github.com/lhdbsbz/szrw/observe"
 	"github.com/lhdbsbz/szrw/tracing"
-	"github.com/lhdbsbz/szrw-template/gen/wiring"
 )
 
 // main 只做三件事：注册服务、挂 HTTP 网关、跑起来。
@@ -45,25 +45,27 @@ func main() {
 		_ = tracing.Shutdown(shutdown)
 	}()
 
-	// 2) 注册全部进程内服务；各服务用 start(...) 挂的后台循环在末尾统一放行。
+	// 2) 调用链路的配套设施先装好，再注册服务：观察者与默认超时都是「调用时刻」读的，
+	//    而 BootAll 末尾就放行了后台循环——晚装的话启动瞬间那几条调用不计指标、
+	//    也没有默认截止时间。
+	//    observe / metrics 是框架给的默认实现：trace 传播 + 每次 RPC 一条结构化日志 + RED 指标。
+	//    observe.Handler 负责 HTTP 入口这一段：沿用上游 X-Trace-Id，没有就新生成，并回写响应头。
+	//    产品要自己的身份信封或日志落盘策略，用 core.SetPropagator / core.AddObserver 覆盖。
+	observe.Install()
+	metrics.Install()
+	// 调用方一元调用的默认截止时间（流不封顶：SSE 可能持续几分钟）。
+	core.SetDefaultTimeout(10 * time.Second)
+
+	// 3) 注册全部进程内服务；各服务用 start(...) 挂的后台循环在末尾统一放行。
 	wiring.BootAll(ctx)
 
-	// 3) HTTP 网关：JSON 口径、流式直出、路由装配都由框架固定，
+	// 4) HTTP 网关：JSON 口径、流式直出、路由装配都由框架固定，
 	//    项目只决定「成功响应长什么样」——这里保持原样返回 proto JSON。
 	//    想套统一信封 {code,message,data}，就给 Options.RewriteResponse。
 	mux := gateway.New(gateway.Options{
 		Register:  func(m *runtime.ServeMux) { wiring.RegisterGateways(ctx, m) },
 		Streaming: wiring.StreamingGatewayMethods,
 	})
-
-	// 调用链路的配套设施由框架给默认实现：trace 传播 + 每次 RPC 一条结构化日志 + RED 指标。
-	// observe.Handler 负责 HTTP 入口这一段：沿用上游 X-Trace-Id，没有就新生成，并回写响应头。
-	// 产品要自己的身份信封或日志落盘策略，用 core.SetPropagator / core.AddObserver 覆盖。
-	observe.Install()
-
-	metrics.Install()
-	// 调用方一元调用的默认截止时间（流不封顶：SSE 可能持续几分钟）。
-	core.SetDefaultTimeout(10 * time.Second)
 
 	// 运维面与业务面分开挂：探针/指标不是 RPC，不进网关。
 	root := http.NewServeMux()
