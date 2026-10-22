@@ -1,7 +1,7 @@
 syntax = "proto3";
 
 package proto.common;
-option go_package = "github.com/lhdbsbz/szrw-service-template/gen/proto/common";
+option go_package = "github.com/lhdbsbz/szrw-template/gen/proto/common";
 
 // Empty 是「无参数」或「无返回值」的占位消息。
 // 不要用 google.protobuf.Empty：本地这份让前端类型生成、int64 处理、JSON 名称

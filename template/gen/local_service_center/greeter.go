@@ -6,8 +6,8 @@ import (
 	"context"
 	"net"
 
-	"github.com/lhdbsbz/szrw/core"
 	"github.com/lhdbsbz/szrw-template/gen/proto/greeter"
+	"github.com/lhdbsbz/szrw/core"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )

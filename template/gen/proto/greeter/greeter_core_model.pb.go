@@ -91,7 +91,7 @@ const file_proto_greeter_greeter_core_model_proto_rawDesc = "" +
 	"\vGreetingLog\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x03R\x02id\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x1c\n" +
-	"\tcreatedAt\x18\x03 \x01(\x03R\tcreatedAtB<Z:github.com/lhdbsbz/szrw-template/gen/proto/greeterb\x06proto3"
+	"\tcreatedAt\x18\x03 \x01(\x03R\tcreatedAtB4Z2github.com/lhdbsbz/szrw-template/gen/proto/greeterb\x06proto3"
 
 var (
 	file_proto_greeter_greeter_core_model_proto_rawDescOnce sync.Once

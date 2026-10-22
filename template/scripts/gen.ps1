@@ -7,7 +7,7 @@
 #   .\scripts\gen.ps1                # 生成；缺实现 = 失败
 #   .\scripts\gen.ps1 -Scaffold      # 加 RPC 时补出骨架文件
 param(
-    [string]$Codegen = (Join-Path (Split-Path -Parent $PSScriptRoot) '..\szrw-codegen'),
+    [string]$Codegen = (Join-Path (Split-Path -Parent $PSScriptRoot) '..'),
     [string]$BuilderImage = 'szrw-builder:latest',
     [switch]$Scaffold
 )

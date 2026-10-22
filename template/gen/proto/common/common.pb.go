@@ -65,7 +65,7 @@ var File_proto_common_common_proto protoreflect.FileDescriptor
 const file_proto_common_common_proto_rawDesc = "" +
 	"\n" +
 	"\x19proto/common/common.proto\x12\fproto.common\"\a\n" +
-	"\x05EmptyB;Z9github.com/lhdbsbz/szrw-template/gen/proto/commonb\x06proto3"
+	"\x05EmptyB3Z1github.com/lhdbsbz/szrw-template/gen/proto/commonb\x06proto3"
 
 var (
 	file_proto_common_common_proto_rawDescOnce sync.Once

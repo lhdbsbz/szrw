@@ -122,7 +122,7 @@ const file_proto_greeter_greeter_proto_rawDesc = "" +
 	"\amessage\x18\x01 \x01(\tR\amessage2\xb9\x01\n" +
 	"\x0eGreeterService\x12u\n" +
 	"\bSayHello\x12\x1a.proto.greeter.SayHelloReq\x1a\x1b.proto.greeter.SayHelloResp\"0\x82\xd3\xe4\x93\x02*:\x01*\"%/grpc-gateway/GreeterService/SayHello\x120\n" +
-	"\x04Ping\x12\x13.proto.common.Empty\x1a\x13.proto.common.EmptyB<Z:github.com/lhdbsbz/szrw-template/gen/proto/greeterb\x06proto3"
+	"\x04Ping\x12\x13.proto.common.Empty\x1a\x13.proto.common.EmptyB4Z2github.com/lhdbsbz/szrw-template/gen/proto/greeterb\x06proto3"
 
 var (
 	file_proto_greeter_greeter_proto_rawDescOnce sync.Once

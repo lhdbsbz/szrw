@@ -1,7 +1,7 @@
 syntax = "proto3";
 
 package proto.greeter;
-option go_package = "github.com/lhdbsbz/szrw-service-template/gen/proto/greeter";
+option go_package = "github.com/lhdbsbz/szrw-template/gen/proto/greeter";
 
 // GreetingLog 演示框架的分层：实体/数据结构放 *_core_model.proto，
 // 接口（service + 请求响应）放 {dir}.proto。生成器会强制这条规则。

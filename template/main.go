@@ -28,10 +28,27 @@ func main() {
 	ctx, stop := core.ShutdownContext()
 	defer stop()
 
-	// 1) 注册全部进程内服务；各服务用 start(...) 挂的后台循环在末尾统一放行。
+	// 1) 观测底座先就位：本次运行的 span 与日志落本地 SQLite。
+	//    必须早于服务注册与 tracing.Install——provider 按 tracer 名缓存 processor，晚了 span 全丢。
+	obs, err := obsdb.Open(obsdb.Options{Dir: "logs"})
+	if err != nil {
+		log.Printf("观测库不可用，仅保留 stdout 日志与 /metrics: %v", err)
+		tracing.Install()
+	} else {
+		defer obs.Close()
+		tracing.Install(obs.Processor())
+		slog.SetDefault(slog.New(obs.Handler(slog.Default().Handler())))
+	}
+	defer func() {
+		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = tracing.Shutdown(shutdown)
+	}()
+
+	// 2) 注册全部进程内服务；各服务用 start(...) 挂的后台循环在末尾统一放行。
 	wiring.BootAll(ctx)
 
-	// 2) HTTP 网关：JSON 口径、流式直出、路由装配都由框架固定，
+	// 3) HTTP 网关：JSON 口径、流式直出、路由装配都由框架固定，
 	//    项目只决定「成功响应长什么样」——这里保持原样返回 proto JSON。
 	//    想套统一信封 {code,message,data}，就给 Options.RewriteResponse。
 	mux := gateway.New(gateway.Options{
@@ -44,22 +61,6 @@ func main() {
 	// 产品要自己的身份信封或日志落盘策略，用 core.SetPropagator / core.AddObserver 覆盖。
 	observe.Install()
 
-	// è§æµåºï¼æ¬æ¬¡è¿è¡ç span + æ¥å¿åæ¬å° SQLiteï¼éå¯æ¢æ°åºï¼ä¸éè¦ schema è¿ç§»ï¼ã
-	// å®å¿é¡»å»ºå¨ tracing.Install ä¹åï¼provider æ tracer åç¼å­ processorï¼æäº span å¨ä¸¢ã
-	obs, err := obsdb.Open(obsdb.Options{Dir: "logs"})
-	if err != nil {
-		log.Printf("è§æµåºä¸å¯ç¨ï¼ä»ä¿ç stdout æ¥å¿ä¸ /metrics: %v", err)
-		tracing.Install()
-	} else {
-		defer obs.Close()
-		tracing.Install(obs.Processor())
-		slog.SetDefault(slog.New(obs.Handler(slog.Default().Handler())))
-	}
-	defer func() {
-		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = tracing.Shutdown(shutdown)
-	}()
 	metrics.Install()
 	// 调用方一元调用的默认截止时间（流不封顶：SSE 可能持续几分钟）。
 	core.SetDefaultTimeout(10 * time.Second)
