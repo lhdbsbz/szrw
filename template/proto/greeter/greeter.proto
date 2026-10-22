@@ -1,0 +1,26 @@
+syntax = "proto3";
+
+package proto.greeter;
+option go_package = "github.com/lhdbsbz/szrw-service-template/gen/proto/greeter";
+
+import "proto/common/common.proto";
+import "google/api/annotations.proto";
+
+message SayHelloReq {
+  string name = 1;
+}
+
+message SayHelloResp {
+  string message = 1;
+}
+
+// GreeterService 是模板里的示例服务：一个走 HTTP 的 rpc + 一个只走进程内调用的 rpc。
+service GreeterService {
+  rpc SayHello(SayHelloReq) returns (SayHelloResp) {
+    option (google.api.http) = {
+      post: "/grpc-gateway/GreeterService/SayHello"
+      body: "*"
+    };
+  }
+  rpc Ping(common.Empty) returns (common.Empty);
+}

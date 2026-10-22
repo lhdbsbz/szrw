@@ -1,0 +1,20 @@
+# 代码生成配置：protoc-gen-szrw-codegen 的唯一输入。
+#
+# 只有两段：段存在 = 生成，段不存在 = 不生成。布局是框架常量，
+# 这里没有可调项，也没有 enabled 开关。
+#
+# 缺实现时是「补骨架」还是「失败」由命令行决定（scripts/gen.* 传 scaffold=write）。
+
+version: 2
+
+# 进程内服务注册、Gate+BootAll、启动契约。
+registry: {}
+
+# 这个模板没有前端。需要时把这行注释去掉并写 targets：
+#
+# frontend_api:
+#   targets:
+#     - dir: web/kit/src/api/grpc-gateway
+#       lang: ts
+#       service_import: "@/api/request"
+#       types_from: "@/api/proto-types"

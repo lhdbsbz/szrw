@@ -1,0 +1,20 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: true
+      # 生成物是提交进仓的（gen/、microservice/），所以这里只验证「能编译」。
+      # 生成物与 proto 是否同步，靠本地 ./scripts/gen.sh 后看 git diff。
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test ./...
