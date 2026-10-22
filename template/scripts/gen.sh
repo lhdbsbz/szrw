@@ -11,9 +11,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-CODEGEN="${CODEGEN:-../szrw-codegen}"
+CODEGEN="${CODEGEN:-..}"
 [[ -x "${CODEGEN}/scripts/generate.sh" ]] || {
-    echo "找不到框架生成脚本: ${CODEGEN}/scripts/generate.sh（用 CODEGEN=... 指定 szrw-codegen 路径）" >&2
+    echo "找不到框架生成脚本: ${CODEGEN}/scripts/generate.sh（用 CODEGEN=... 指定框架仓路径）" >&2
     exit 1
 }
 

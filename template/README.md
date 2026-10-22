@@ -129,7 +129,7 @@ proto/                契约（common + greeter：{dir}.proto 写接口，{dir}_
 proto_third/          protoc 需要的第三方 proto（google/api）
 gen/                  生成物，可整体删除重建
 microservice/greeter/ 实现：rpc.go + 一 rpc 一个文件
-pkg/                  运行时（待抽成 szrw）
+pkg/                  本项目的运行时扩展点（框架不提供）
 scripts/              生成脚本
 main.go               装配入口
 ```

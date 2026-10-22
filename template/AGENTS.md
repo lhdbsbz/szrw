@@ -2,6 +2,8 @@
 
 框架的最小可运行项目。**手写只有三样：proto、`codegen.yaml`、`main.go`；其余全是生成物或骨架。**
 
+**怎么加**（RPC / 表 / 页面 / 站点 / MQ、验收清单、静态检查）：见框架规则 [`../docs/framework.md`](../docs/framework.md)。本文件只写这个模板自己的事实。
+
 ## 命令
 
 ```powershell
