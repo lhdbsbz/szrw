@@ -39,7 +39,7 @@ done
 # 框架插件从本仓源码安装：改生成器不必先发布，项目也不用自己 go install。
 # GOPROXY 只在未设置时给个默认（国内直连 proxy.golang.org 会挂，跟各项目 build 脚本一致）。
 export GOPROXY="${GOPROXY:-https://goproxy.cn,direct}"
-( cd "$CODEGEN_SRC" && go install ./cmd/protoc-gen-szrw )
+( cd "$CODEGEN_SRC" && go install ./cmd/protoc-gen-szrw-codegen )
 export PATH="$(go env GOPATH)/bin:${PATH}"
 
 PROTO_FILES=()
@@ -70,7 +70,7 @@ if ! protoc \
     "--go-grpc_out=$GEN"       "--go-grpc_opt=paths=source_relative" \
     "--go-json_out=$GEN"       "--go-json_opt=paths=source_relative,allow_unknown=true,emit_defaults=true" \
     "--grpc-gateway_out=$GEN"  "--grpc-gateway_opt=paths=source_relative" \
-    "--szrw_out=$ROOT" "--szrw_opt=$OPT" \
+    "--szrw-codegen_out=$ROOT" "--szrw-codegen_opt=$OPT" \
     "${PROTO_FILES[@]}"
 then
     restore_gen

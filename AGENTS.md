@@ -1,4 +1,4 @@
-# AGENTS.md — szrw-runtime
+# AGENTS.md — szrw
 
 框架的运行时契约。**只放「所有项目必须一致才不出错」的机制。**
 
