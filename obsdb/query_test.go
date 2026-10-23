@@ -2,6 +2,8 @@ package obsdb
 
 import (
 	"context"
+	"fmt"
+	"math"
 	"testing"
 	"time"
 )
@@ -204,5 +206,146 @@ func TestRequestEntryAcceptsUpstreamTraceparent(t *testing.T) {
 	}
 	if report.Total.Count != 1 {
 		t.Fatalf("RED 也应把它算进 QPS，got %d", report.Total.Count)
+	}
+}
+
+// repMS 造 n 条相同的时长（毫秒）。
+func repMS(ms float64, n int) []float64 {
+	out := make([]float64, n)
+	for i := range out {
+		out[i] = ms
+	}
+	return out
+}
+
+// assertQuantilesOrdered 钉住 RED 的分位不变式：0 <= p50 <= p95 <= p99 <= max。
+// 趋势点没有独立的 max，只能拿系列 max 当上界，同时要求 p95 <= p99。
+func assertQuantilesOrdered(t *testing.T, label string, s RedSeries) {
+	t.Helper()
+	if s.P50MS < 0 || s.P95MS < 0 || s.P99MS < 0 {
+		t.Fatalf("%s: 分位为负: p50=%v p95=%v p99=%v", label, s.P50MS, s.P95MS, s.P99MS)
+	}
+	if s.P50MS > s.P95MS || s.P95MS > s.P99MS || s.P99MS > s.MaxMS {
+		t.Fatalf("%s: 必须 0<=p50<=p95<=p99<=max，got p50=%v p95=%v p99=%v max=%v",
+			label, s.P50MS, s.P95MS, s.P99MS, s.MaxMS)
+	}
+	for i, p := range s.Points {
+		if p.P95MS < 0 || p.P99MS < 0 || p.P95MS > p.P99MS || p.P99MS > s.MaxMS {
+			t.Fatalf("%s: 趋势第 %d 桶越界/逆序: p95=%v p99=%v seriesMax=%v",
+				label, i, p.P95MS, p.P99MS, s.MaxMS)
+		}
+	}
+}
+
+// TestREDQuantilesBoundedByMax 是「P95 大于 Max」的回归：
+//
+// 生产症状：count=3、max=160.08、p95=242.5、p99=248.5——3 条样本都落在 (100,250]，
+// 旧实现按桶边界 [100,250] 线性插值，把桶上界当成了数据支撑。
+// 现在插值区间被实测 [min,max] 收紧，并且对 max 封顶。
+func TestREDQuantilesBoundedByMax(t *testing.T) {
+	s, err := Open(Options{Dir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	base := time.Now().Add(-2 * time.Minute).UnixNano()
+	cases := []struct {
+		name string
+		ms   []float64
+	}{
+		{"count1", []float64{160.08}},                                                 // 单样本：三条分位线应精确等于 max
+		{"count2", []float64{150, 160.08}},                                            // 同桶两条
+		{"count3", []float64{158, 159.5, 160.08}},                                     // 生产症状
+		{"cross", append(append(repMS(10, 90), repMS(160, 5)...), repMS(2000, 5)...)}, // 跨多桶 + 末桶外
+		{"over10s", []float64{11000, 12000}},                                          // 落在 +Inf 末桶
+	}
+	for ci, c := range cases {
+		// 每个 case 间隔 6s 起跑：让它们落进不同的趋势时间桶，覆盖按时间桶 merge 极值。
+		seriesBase := base + int64(ci)*int64(6*time.Second)
+		for i, ms := range c.ms {
+			start := seriesBase + int64(i)*int64(time.Millisecond)
+			dur := time.Duration(ms * float64(time.Millisecond))
+			id := fmt.Sprintf("%s-%d", c.name, i)
+			pushSpan(s, Span{TraceID: id, SpanID: id,
+				Name:    "POST /grpc-gateway/Regression/" + c.name,
+				Service: "gateway", Protocol: "HTTP", Status: "SUCCESS", StatusCode: "200",
+				StartNS: start, EndNS: start + int64(dur)})
+		}
+	}
+	time.Sleep(400 * time.Millisecond) // 等 200ms 批量落盘
+
+	window := Window{FromNS: base - int64(time.Second), UntilNS: base + int64(40*time.Second)}
+	report, err := s.RED(context.Background(), RedQuery{Window: window, Buckets: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := make(map[string]RedSeries, len(report.Series))
+	for _, sr := range report.Series {
+		byName[sr.Name] = sr
+	}
+	if len(byName) != len(cases) {
+		t.Fatalf("入口分组不对: got %d series", len(byName))
+	}
+	for _, c := range cases {
+		sr, ok := byName["POST /grpc-gateway/Regression/"+c.name]
+		if !ok {
+			t.Fatalf("缺少 series %q", c.name)
+		}
+		if sr.Count != int64(len(c.ms)) {
+			t.Fatalf("%s: count 不对 got %d want %d", c.name, sr.Count, len(c.ms))
+		}
+		wantMax := 0.0
+		for _, ms := range c.ms {
+			wantMax = math.Max(wantMax, ms)
+		}
+		if math.Abs(sr.MaxMS-wantMax) > 0.01 {
+			t.Fatalf("%s: max 应是精确值 %v，got %v", c.name, wantMax, sr.MaxMS)
+		}
+		assertQuantilesOrdered(t, c.name, sr)
+	}
+
+	// count=1：唯一一条样本就是 max，分位不应再被桶宽放大。
+	if one := byName["POST /grpc-gateway/Regression/count1"]; math.Abs(one.P50MS-one.MaxMS) > 1e-9 ||
+		math.Abs(one.P95MS-one.MaxMS) > 1e-9 || math.Abs(one.P99MS-one.MaxMS) > 1e-9 {
+		t.Fatalf("count1 的三条分位线应等于 max=%v，got p50=%v p95=%v p99=%v",
+			one.MaxMS, one.P50MS, one.P95MS, one.P99MS)
+	}
+	// 生产症状的直球断言：修复前这里是 242.5 / 248.5。
+	if three := byName["POST /grpc-gateway/Regression/count3"]; three.P95MS >= 242 || three.P99MS >= 248 {
+		t.Fatalf("count3 的分位应落在实测 [158,160.08] 内，got p95=%v p99=%v max=%v",
+			three.P95MS, three.P99MS, three.MaxMS)
+	}
+	// ALL 汇总也要满足同一不变式。
+	assertQuantilesOrdered(t, "ALL", report.Total)
+}
+
+// TestHistogramQuantileSupport 直接钉住插值区间的口径（不经 SQL，跑得快）：
+// 样本全在同一个桶里时，区间退化成实测 [min,max]；末桶（+Inf）用 max 当上界。
+func TestHistogramQuantileSupport(t *testing.T) {
+	const le250 = 7 // redBoundsMS[7] == 250，(100,250] 这一桶
+	all := make([]int64, len(redBoundsMS)+1)
+	all[le250] = 3
+
+	p50, p95, p99 := redQuantiles(all, 158, 160.08)
+	if p50 < 158 || p99 > 160.08 || p50 > p95 || p95 > p99 {
+		t.Fatalf("单桶样本应收敛到 [158,160.08] 且单调，got %v %v %v", p50, p95, p99)
+	}
+
+	single := make([]int64, len(redBoundsMS)+1)
+	single[le250] = 1
+	if q := histogramQuantile(0.95, single, 160.08, 160.08); math.Abs(q-160.08) > 1e-9 {
+		t.Fatalf("count=1 时应精确返回 max，got %v", q)
+	}
+
+	last := make([]int64, len(redBoundsMS)+1)
+	last[len(redBoundsMS)] = 2 // 都在 +Inf 末桶
+	if p50, p95, p99 := redQuantiles(last, 11000, 12000); p50 < 11000 || p99 > 12000 || p99 < p95 {
+		t.Fatalf("末桶应以实测 max 为上界，got %v %v %v", p50, p95, p99)
+	}
+
+	empty := make([]int64, len(redBoundsMS)+1)
+	if p50, p95, p99 := redQuantiles(empty, 0, 0); p50 != 0 || p95 != 0 || p99 != 0 {
+		t.Fatalf("空直方图应为 0，got %v %v %v", p50, p95, p99)
 	}
 }

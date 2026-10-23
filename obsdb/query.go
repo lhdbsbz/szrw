@@ -446,27 +446,61 @@ type RedReport struct {
 }
 
 // redAcc 是一个系列（或全局）的累加器：窗口汇总 + 每桶耗时直方图。
+//
+// minNS/maxNS 是这一组的精确极值，bucketMinNS/bucketMaxNS 是每个时间桶的精确极值；
+// 分位数靠它们把插值区间收紧到实测范围（见 histogramQuantile）。
 type redAcc struct {
-	count, errs, sumNS, maxNS int64
-	hist                      [][]int64 // [时间桶][耗时桶]
-	errByBucket               []int64
+	count, errs, sumNS int64
+	minNS, maxNS       int64
+	hist               [][]int64 // [时间桶][耗时桶]
+	bucketCount        []int64
+	bucketMinNS        []int64
+	bucketMaxNS        []int64
+	errByBucket        []int64
 }
 
 func newRedAcc(buckets int) *redAcc {
-	a := &redAcc{hist: make([][]int64, buckets), errByBucket: make([]int64, buckets)}
+	a := &redAcc{
+		hist:        make([][]int64, buckets),
+		bucketCount: make([]int64, buckets),
+		bucketMinNS: make([]int64, buckets),
+		bucketMaxNS: make([]int64, buckets),
+		errByBucket: make([]int64, buckets),
+	}
 	for i := range a.hist {
 		a.hist[i] = make([]int64, len(redBoundsMS)+1)
 	}
 	return a
 }
 
-func (a *redAcc) add(tb, bucket, count, errs, sumNS, maxNS int64) {
+// add 合并一批 SQL 聚合行（同一个 [时间桶, 耗时桶]）。count 恒 >= 1，
+// 所以「此前计数为 0」就是可直接取本行极值的第一行（全局看 a.count，每个时间桶看 bucketCount）。
+func (a *redAcc) add(tb, bucket, count, errs, sumNS, minNS, maxNS int64) {
+	if a.count == 0 {
+		a.minNS, a.maxNS = minNS, maxNS
+	} else {
+		if minNS < a.minNS {
+			a.minNS = minNS
+		}
+		if maxNS > a.maxNS {
+			a.maxNS = maxNS
+		}
+	}
 	a.count += count
 	a.errs += errs
 	a.sumNS += sumNS
-	if maxNS > a.maxNS {
-		a.maxNS = maxNS
+
+	if a.bucketCount[tb] == 0 {
+		a.bucketMinNS[tb], a.bucketMaxNS[tb] = minNS, maxNS
+	} else {
+		if minNS < a.bucketMinNS[tb] {
+			a.bucketMinNS[tb] = minNS
+		}
+		if maxNS > a.bucketMaxNS[tb] {
+			a.bucketMaxNS[tb] = maxNS
+		}
 	}
+	a.bucketCount[tb] += count
 	a.hist[tb][bucket] += count
 	a.errByBucket[tb] += errs
 }
@@ -474,7 +508,8 @@ func (a *redAcc) add(tb, bucket, count, errs, sumNS, maxNS int64) {
 // redBoundsMS 是耗时直方图的桶上界（毫秒，le 语义），末桶为 +Inf。
 //
 // 与 Prometheus 默认桶（szrw_rpc_duration_seconds）同一套刻度，只是换成毫秒：
-// 分位数由这张直方图按 histogram_quantile 同法线性插值，误差不超过一个桶宽。
+// 分位数由这张直方图插值（histogram_quantile 同法），但插值区间收紧到实测 [min, max]，
+// 所以误差不超过一个桶宽，且永远不会越过该组的 max。
 var redBoundsMS = []float64{1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000}
 
 // redSeriesCap 防止高基数入口名（攻击者构造 /grpc-gateway/<随机串>）把页面撑爆。
@@ -494,8 +529,9 @@ func durationBucketExpr(alias string) string {
 //
 // 口径：
 //   - 只统计「请求入口」的根 span（见 requestEntryScope），一次请求一条，QPS 不被内部 RPC 放大；
-//   - count/avg/max 为精确值；p50/p95/p99 由耗时直方图插值估算（见 redBoundsMS）；
-//   - 趋势的桶宽由窗口长度决定，桶内 p95 同样来自直方图。
+//   - count/avg/max 为精确值；p50/p95/p99 由耗时直方图在实测 [min, max] 内
+//     插值估算（见 histogramQuantile），小样本因此退化成「区间内插值」而不是桶边界外推；
+//   - 趋势的桶宽由窗口长度决定，桶内 p95/p99 用的是该时间桶自己的 [min, max]。
 func (s *Store) RED(ctx context.Context, q RedQuery) (RedReport, error) {
 	from, until := q.Window.FromNS, q.Window.UntilNS
 	if until <= from {
@@ -534,6 +570,7 @@ func (s *Store) RED(ctx context.Context, q RedQuery) (RedReport, error) {
 			COUNT(*) AS c,
 			SUM(CASE WHEN %s THEN 1 ELSE 0 END) AS e,
 			SUM(s.end_ns - s.start_ns) AS sum_ns,
+			MIN(s.end_ns - s.start_ns) AS min_ns,
 			MAX(s.end_ns - s.start_ns) AS max_ns
 		FROM span s
 		WHERE %s AND s.start_ns >= ? AND s.start_ns <= ?
@@ -547,8 +584,8 @@ func (s *Store) RED(ctx context.Context, q RedQuery) (RedReport, error) {
 		}
 		for rows.Next() {
 			var name, service, protocol string
-			var tb, bucket, count, errs, sumNS, maxNS int64
-			if err := rows.Scan(&name, &service, &protocol, &tb, &bucket, &count, &errs, &sumNS, &maxNS); err != nil {
+			var tb, bucket, count, errs, sumNS, minNS, maxNS int64
+			if err := rows.Scan(&name, &service, &protocol, &tb, &bucket, &count, &errs, &sumNS, &minNS, &maxNS); err != nil {
 				_ = rows.Close()
 				return RedReport{}, err
 			}
@@ -561,8 +598,8 @@ func (s *Store) RED(ctx context.Context, q RedQuery) (RedReport, error) {
 				a = newRedAcc(buckets)
 				series[key] = a
 			}
-			a.add(tb, bucket, count, errs, sumNS, maxNS)
-			total.add(tb, bucket, count, errs, sumNS, maxNS)
+			a.add(tb, bucket, count, errs, sumNS, minNS, maxNS)
+			total.add(tb, bucket, count, errs, sumNS, minNS, maxNS)
 		}
 		if err := rows.Err(); err != nil {
 			_ = rows.Close()
@@ -583,21 +620,16 @@ func (s *Store) RED(ctx context.Context, q RedQuery) (RedReport, error) {
 				all[j] += c
 			}
 		}
-		out.P50MS = histogramQuantile(0.50, all, out.MaxMS)
-		out.P95MS = histogramQuantile(0.95, all, out.MaxMS)
-		out.P99MS = histogramQuantile(0.99, all, out.MaxMS)
+		out.P50MS, out.P95MS, out.P99MS = redQuantiles(all, float64(a.minNS)/1e6, out.MaxMS)
 		out.Points = make([]RedPoint, buckets)
 		for i := range a.hist {
-			var count int64
-			for _, c := range a.hist[i] {
-				count += c
-			}
+			_, p95, p99 := redQuantiles(a.hist[i], float64(a.bucketMinNS[i])/1e6, float64(a.bucketMaxNS[i])/1e6)
 			out.Points[i] = RedPoint{
 				StartNS:    from + int64(i)*bucketNS,
-				Count:      count,
+				Count:      a.bucketCount[i],
 				ErrorCount: a.errByBucket[i],
-				P95MS:      histogramQuantile(0.95, a.hist[i], out.MaxMS),
-				P99MS:      histogramQuantile(0.99, a.hist[i], out.MaxMS),
+				P95MS:      p95,
+				P99MS:      p99,
 			}
 		}
 		return out
@@ -628,9 +660,31 @@ func (s *Store) RED(ctx context.Context, q RedQuery) (RedReport, error) {
 	return report, nil
 }
 
-// histogramQuantile 按 Prometheus histogram_quantile 的方式在桶内线性插值。
-// counts 是各耗时桶的计数（末桶 = 大于最后一个上界），maxMS 是观测到的最大值。
-func histogramQuantile(q float64, counts []int64, maxMS float64) float64 {
+// redQuantiles 返回一组的三条分位线，并保证 0 <= p50 <= p95 <= p99 <= max。
+func redQuantiles(counts []int64, minMS, maxMS float64) (p50, p95, p99 float64) {
+	p50 = histogramQuantile(0.50, counts, minMS, maxMS)
+	p95 = histogramQuantile(0.95, counts, minMS, maxMS)
+	p99 = histogramQuantile(0.99, counts, minMS, maxMS)
+	if p95 < p50 {
+		p95 = p50
+	}
+	if p99 < p95 {
+		p99 = p95
+	}
+	return p50, p95, p99
+}
+
+// histogramQuantile 按 Prometheus histogram_quantile 的方式在桶内线性插值，
+// 但插值区间不是桶边界，而是桶边界与该组实测 [minMS, maxMS] 的交集。
+//
+// 为什么：桶只记 le 上界，(100,250] 里的样本可能全都贴着 250，也可能全都贴着 100。
+// 1/2/3 条样本落在这个桶里时，按桶边界插值会把这个不确定性放大成「P95 > Max」
+// （实测：3 条都在 (100,250]、max=160.08 → p95=242.5、p99=248.5）。
+// 用实测极值收紧区间后：样本全在一个桶里时区间就退化成真实支撑 [min, max]，
+// count=1 时三条分位线精确等于 max；跨桶时与 histogram_quantile 一致，只是被 max 封顶。
+//
+// counts 是各耗时桶的计数（末桶 = 大于最后一个上界），minMS/maxMS 是该组实测最小/最大值。
+func histogramQuantile(q float64, counts []int64, minMS, maxMS float64) float64 {
 	var total int64
 	for _, c := range counts {
 		total += c
@@ -638,26 +692,33 @@ func histogramQuantile(q float64, counts []int64, maxMS float64) float64 {
 	if total == 0 {
 		return 0
 	}
+	if minMS < 0 {
+		minMS = 0
+	}
+	if maxMS < minMS {
+		maxMS = minMS
+	}
+
 	rank := q * float64(total)
 	var cum int64
 	lower := 0.0
 	for i, c := range counts {
 		if float64(cum)+float64(c) >= rank {
-			if i >= len(redBoundsMS) {
-				return maxMS
+			// 桶 i 覆盖 (lower, redBoundsMS[i]]，末桶没有上界。
+			upper := maxMS
+			if i < len(redBoundsMS) {
+				upper = min(redBoundsMS[i], maxMS)
 			}
-			upper := redBoundsMS[i]
+			lower = max(lower, minMS)
+			if upper < lower {
+				upper = lower
+			}
 			if c <= 0 {
 				return upper
 			}
 			frac := (rank - float64(cum)) / float64(c)
-			if frac < 0 {
-				frac = 0
-			}
-			if frac > 1 {
-				frac = 1
-			}
-			return lower + (upper-lower)*frac
+			frac = min(max(frac, 0), 1)
+			return min(lower+(upper-lower)*frac, maxMS)
 		}
 		cum += c
 		if i < len(redBoundsMS) {
