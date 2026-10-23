@@ -338,7 +338,7 @@ root.Handle("/metrics", metrics.Handler())          // 只给内网或反代白�
 **发布**
 
 - 二进制 + 生产配置 + 前端产物打一个镜像；镜像变量用项目自己的（如 `*_IMAGE`），不要通用 `IMAGE`。
-- 镜像仓库若拒绝 BuildKit attestation（ACR 个人版这类），在脚本里固定关 `--provenance/--sbom` 并设 `BUILDX_NO_DEFAULT_ATTESTATIONS=1`。
+- 镜像推到自建私有仓 `registry.lmcl.xyz`（默认 `registry.lmcl.xyz/lhdshr/<name>:latest`），推/拉前都要 `docker login` 一次，CI 可用 `REGISTRY_USER` / `REGISTRY_PASSWORD`（框架层的 `Confirm-SzrwRegistryLogin` / `szrw_registry_login` 负责自动登录）。脚本仍固定关 `--provenance/--sbom` 并设 `BUILDX_NO_DEFAULT_ATTESTATIONS=1`：不需要 provenance/SBOM，少一层 manifest，也不依赖目标 registry 的 OCI artifact 支持。
 - 契约变更的发布顺序：**服务端 + web 同镜像原子生效，再推移动端整包/更新包**。网关对未知字段是静默丢弃，删/改字段后旧客户端是「降级」而不是报错，上线说明要写清窗口期内的可见行为。
 - 迁移 SQL 不进仓（见 §3.2）。
 

@@ -5,16 +5,15 @@
 #   BUILDX_NO_DEFAULT_ATTESTATIONS=1
 #   --provenance=false --sbom=false
 #
-# Why: Docker Desktop (BuildKit >= 0.32) attaches provenance as an OCI artifact
-# whose config media type is application/vnd.oci.empty.v1+json. Aliyun ACR
-# Personal / Standard rejects that class, so `docker push` fails after layers
-# upload. ACR Enterprise can store OCI artifacts; if the destination becomes
-# one of those registries, the script flags can be removed and provenance
-# re-enabled here.
+# Why: the destination is the private registry registry.lmcl.xyz (needs
+# `docker login` once on every machine that pushes or pulls; CI can use
+# REGISTRY_USER / REGISTRY_PASSWORD). Attestations stay off: not needed for a
+# personal image, saves a manifest layer, and avoids depending on how completely
+# the target registry handles OCI artifacts.
 
 variable "SZRW_TEMPLATE_IMAGE" {
-  default     = "registry.cn-shanghai.aliyuncs.com/lhdshr/szrw-template:latest"
-  description = "Runtime image pushed to Aliyun ACR. Override with env SZRW_TEMPLATE_IMAGE, not IMAGE."
+  default     = "registry.lmcl.xyz/lhdshr/szrw-template:latest"
+  description = "Runtime image pushed to registry.lmcl.xyz. Override with env SZRW_TEMPLATE_IMAGE, not IMAGE."
 }
 
 group "default" {
@@ -22,7 +21,7 @@ group "default" {
 }
 
 target "runtime" {
-  description = "linux/amd64 production image. Attestations must stay off for ACR Personal."
+  description = "linux/amd64 production image. Attestations stay off (see header)."
   context     = "."
   dockerfile  = "Dockerfile"
   platforms   = ["linux/amd64"]

@@ -23,7 +23,7 @@ if (-not (Test-Path -LiteralPath $Framework)) {
 . $Framework
 
 # 镜像变量用项目自己的名字：残留的通用 IMAGE 会把镜像推到别的仓。
-$Image = if ($env:SZRW_TEMPLATE_IMAGE) { $env:SZRW_TEMPLATE_IMAGE } else { 'registry.cn-shanghai.aliyuncs.com/lhdshr/szrw-template:latest' }
+$Image = if ($env:SZRW_TEMPLATE_IMAGE) { $env:SZRW_TEMPLATE_IMAGE } else { 'registry.lmcl.xyz/lhdshr/szrw-template:latest' }
 $env:SZRW_TEMPLATE_IMAGE = $Image
 
 # 容器里：生成（gen.sh 用框架挂载的 CODEGEN）→ 交叉编译出镜像要 COPY 的 main。

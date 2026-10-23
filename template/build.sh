@@ -21,7 +21,7 @@ fi
 source "$FRAMEWORK"
 
 # 镜像变量用项目自己的名字：残留的通用 IMAGE 会把镜像推到别的仓。
-export SZRW_TEMPLATE_IMAGE="${SZRW_TEMPLATE_IMAGE:-registry.cn-shanghai.aliyuncs.com/lhdshr/szrw-template:latest}"
+export SZRW_TEMPLATE_IMAGE="${SZRW_TEMPLATE_IMAGE:-registry.lmcl.xyz/lhdshr/szrw-template:latest}"
 
 SKIP_PUSH=false
 case "${1:-}" in

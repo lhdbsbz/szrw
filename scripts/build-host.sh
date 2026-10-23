@@ -4,10 +4,10 @@
 # 不是独立脚本——参数化代价比 dot-source 大：项目只需要说四个事实。
 #
 # 这里只有「所有项目必须一致」的机制：
-#   ① 关掉 BuildKit attestation（ACR 个人版拒绝 OCI artifact，push 会在层上传完后失败）
+#   ① 关掉 BuildKit attestation（不需要 provenance/SBOM，省一层 manifest，也不依赖目标 registry 的 OCI artifact 支持）
 #   ② 工具链镜像存在性检查与构建（构建也关 attestation；裸 docker build 会漂移）
 #   ③ docker run 的三个固定挂载：repo / szrw / 缓存（+ 可选的多站点 node_modules）
-#   ④ --load / --push 的选择
+#   ④ --load / --push 的选择，以及推送前对私有 registry 的登录（REGISTRY_USER / REGISTRY_PASSWORD）
 #
 # 项目只提供：镜像名、bake 文件、目标名、是否多站点 staging。
 # 容器内的项目脚本看到的是固定路径与环境变量：
@@ -56,7 +56,7 @@ szrw_volume_prefix() {
 
 # 工具链镜像属于框架仓（<codegen>/Dockerfile.builder），项目不定义它，只在使用前确保存在。
 # 注意这里必须是 buildx + 显式关 attestation：普通 docker build 在 BuildKit 下同样会追加
-# provenance，构建出来的镜像一旦被 push 就会踩 ACR 的同一个坑。
+# provenance，构建出来的镜像一旦被 push 就会比 bake 出来的多一层 manifest。
 szrw_ensure_builder() {
     local codegen="${1%/}" image="${2:-szrw-builder:latest}" dockerfile
     if docker image inspect "$image" >/dev/null 2>&1; then
@@ -120,6 +120,26 @@ szrw_run_container() {
         ${volume_args[@]+"${volume_args[@]}"} \
         "${entry_args[@]}" \
         "$image" ${tail_args[@]+"${tail_args[@]}"} "$@"
+}
+
+# 目标 registry 是自建的私有仓（registry.lmcl.xyz）：推送前需要凭据。
+# 本机 docker login 一次即可；CI 用 REGISTRY_USER / REGISTRY_PASSWORD 自动登录。
+szrw_registry_login() {
+    local image="$1" skip_push="$2" registry_host
+    [[ "$skip_push" == true || -z "$image" ]] && return 0
+    # 没有 namespace 的短名（如 myimg:latest）走 Docker Hub，不需要登录
+    [[ "$image" == */* ]] || return 0
+    registry_host="${image%%/*}"
+    # 首段必须是真正的主机名（带 . / : 或 localhost）
+    [[ "$registry_host" == *.* || "$registry_host" == *:* || "$registry_host" == localhost ]] || return 0
+    if [[ -n "${REGISTRY_USER:-}" && -n "${REGISTRY_PASSWORD:-}" ]]; then
+        printf '%s' "$REGISTRY_PASSWORD" | docker login "$registry_host" -u "$REGISTRY_USER" --password-stdin >/dev/null || {
+            echo "ERROR: docker login $registry_host 失败" >&2
+            return 1
+        }
+    else
+        echo "提示: 推送需要已登录 $registry_host（docker login $registry_host）"
+    fi
 }
 
 # 在 bake 文件所在目录执行：HCL 里的 context = "." 相对它自己。
@@ -196,6 +216,7 @@ szrw_invoke_build() {
     fi
 
     if [[ -n "$bake_file" ]]; then
+        szrw_registry_login "$image" "$skip_push" || return 1
         echo "Building image: ${image:-<bake 变量>} (target: ${bake_target})"
         szrw_bake "$bake_file" "$bake_target" "$skip_push" || return 1
         if [[ "$skip_push" == true ]]; then

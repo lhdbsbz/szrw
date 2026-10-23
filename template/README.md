@@ -151,8 +151,11 @@ staticcheck/deadcode/govulncheck），定义在 `szrw/Dockerfile.builder`，先�
 前端站点清单由生成器写到 `gen/frontends.json`（本模板没有前端，所以是空列表）；
 脚本读清单，清单缺失时才按同一谓词回退探测。
 
-镜像仓库若拒绝 BuildKit attestation（阿里云 ACR 个人版），不要在项目里另加开关：
-框架层已固定 `BUILDX_NO_DEFAULT_ATTESTATIONS=1` + `--provenance=false --sbom=false`，
+镜像仓库是自建私有仓 `registry.lmcl.xyz`（默认 `registry.lmcl.xyz/lhdshr/szrw-template:latest`），
+推/拉前要 `docker login registry.lmcl.xyz` 一次，CI 用 `REGISTRY_USER` / `REGISTRY_PASSWORD`
+（框架层 `szrw_registry_login` / `Confirm-SzrwRegistryLogin` 会自动登录），不要在项目里再抄一遍。
+
+attestation 仍然固定关：框架层已固定 `BUILDX_NO_DEFAULT_ATTESTATIONS=1` + `--provenance=false --sbom=false`，
 builder 镜像的构建也走同一套。
 
 ## 新增包放哪

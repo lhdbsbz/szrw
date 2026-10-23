@@ -3,14 +3,15 @@
 #
 # 与 scripts/build-host.sh 行为一致（同一组函数、同一组挂载与环境变量）；
 # 函数对应：Invoke-SzrwBuild ↔ szrw_invoke_build，Invoke-SzrwBake ↔ szrw_bake，
-#           Build-SzrwBuilderImage ↔ szrw_ensure_builder，Invoke-SzrwContainer ↔ szrw_run_container。
+#           Build-SzrwBuilderImage ↔ szrw_ensure_builder，Invoke-SzrwContainer ↔ szrw_run_container，
+#           Confirm-SzrwRegistryLogin ↔ szrw_registry_login。
 # 改这里必须同一次改那边。
 #
 # 这里只有「所有项目必须一致」的机制：
-#   ① 关掉 BuildKit attestation（ACR 个人版拒绝 OCI artifact，push 会在层上传完后失败）
+#   ① 关掉 BuildKit attestation（不需要 provenance/SBOM，省一层 manifest，也不依赖目标 registry 的 OCI artifact 支持）
 #   ② 工具链镜像存在性检查与构建（构建也关 attestation；裸 docker build 会漂移）
 #   ③ docker run 的三个固定挂载：repo / szrw / 缓存（+ 可选的多站点 node_modules）
-#   ④ --load / --push 的选择
+#   ④ --load / --push 的选择，以及推送前对私有 registry 的登录（REGISTRY_USER / REGISTRY_PASSWORD）
 #
 # 容器内的项目脚本看到的是固定路径与环境变量：
 #   REPO_ROOT=/workspace/repo  WORKSPACE_DIR=/workspace  CODEGEN=/workspace/szrw
@@ -102,7 +103,7 @@ function Get-SzrwFrontendSites {
 
 # 工具链镜像属于框架仓（<Codegen>/Dockerfile.builder），项目不定义它，只在使用前确保存在。
 # 注意这里必须是 buildx + 显式关 attestation：普通 docker build 在 BuildKit 下同样会追加
-# provenance，构建出来的镜像一旦被 push 就会踩 ACR 的同一个坑。
+# provenance，构建出来的镜像一旦被 push 就会比 bake 出来的多一层 manifest。
 function Build-SzrwBuilderImage {
     param(
         [Parameter(Mandatory = $true)][string]$Codegen,
@@ -179,6 +180,27 @@ function Invoke-SzrwContainer {
     if ($LASTEXITCODE -ne 0) { throw "Container build failed (exit $LASTEXITCODE)" }
 }
 
+# 目标 registry 是自建的私有仓（registry.lmcl.xyz）：推送前需要凭据。
+# 本机 docker login 一次即可；CI 用 REGISTRY_USER / REGISTRY_PASSWORD 自动登录。
+function Confirm-SzrwRegistryLogin {
+    param(
+        [string]$Image,
+        [switch]$SkipPush
+    )
+    if ($SkipPush -or -not $Image) { return }
+    # 没有 namespace 的短名（如 myimg:latest）走 Docker Hub，不需要登录
+    if ($Image -notmatch '/') { return }
+    $registryHost = ($Image -split '/')[0]
+    # 首段必须是真正的主机名（带 . / : 或 localhost）
+    if ($registryHost -notmatch '[.:]|^localhost$') { return }
+    if ($env:REGISTRY_USER -and $env:REGISTRY_PASSWORD) {
+        $env:REGISTRY_PASSWORD | docker login $registryHost -u $env:REGISTRY_USER --password-stdin
+        if ($LASTEXITCODE -ne 0) { throw "docker login $registryHost 失败" }
+    } else {
+        Write-Host "提示: 推送需要已登录 $registryHost（docker login $registryHost）" -ForegroundColor DarkGray
+    }
+}
+
 # 在 bake 文件所在目录执行：HCL 里的 context = "." 相对它自己。
 function Invoke-SzrwBake {
     param(
@@ -237,6 +259,7 @@ function Invoke-SzrwBuild {
 
     if ($BakeFile) {
         $label = if ($Image) { $Image } else { '<bake 变量>' }
+        Confirm-SzrwRegistryLogin -Image $Image -SkipPush:$SkipPush
         Write-Host "Building image: $label (target: $BakeTarget)" -ForegroundColor Cyan
         Invoke-SzrwBake -BakeFile $BakeFile -BakeTarget $BakeTarget -SkipPush:$SkipPush
         if ($SkipPush) {
