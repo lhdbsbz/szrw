@@ -9,14 +9,19 @@
 ```powershell
 .\scripts\gen.ps1     # 生成（容器里跑 protoc；宿主只需 Docker）
 go run .              # http://localhost:8080
+.\build.ps1 -SkipPush # 生成 + 交叉编译 + 打包镜像（不推送）
 curl -X POST localhost:8080/grpc-gateway/GreeterService/SayHello -d '{"name":"szrw"}'
 ```
+
+发布链只写项目段（四个事实：镜像变量 / bake 文件 / bake target / 是否多站点 staging）+ 一次 `Invoke-SzrwBuild`（shell 是 `szrw_invoke_build`），机制在 `../szrw/scripts/build-host.*`：
+别再往 `build.ps1` 里抄「关 attestation、确保 builder 镜像、docker run 挂载、bake 推送」。
 
 `.\scripts\gen.ps1` 默认从同级 `..\szrw` 装插件（`-Codegen` 可改），所以改生成器不必先发布。
 宿主有 protoc 时可直接 `bash scripts/gen.sh`。
 
 ## 死线
 
+- **框架已吸纳的机制直接用**：`szrw/log`（slog 门面 + 安全 JSON）、`szrw/webstatic`（站点 Handler）、`szrw/lock`（锁协议）、`szrw/sqlx`（SQL 日志内联）。本仓自己的横切工具放 `pkg/`；驱动适配器也在项目侧（框架定协议，项目给驱动）。
 - **`gen/` 是生成物**：可整体删除重建，任何手改都会在下次生成时丢失。
 - **不要手写 `microservice/<域>/rpc.go` 和 `<rpc_snake>.go`**：`--scaffold` 会补，而且一 rpc 一文件的规则由生成器强制。
 - **运行时契约在 `szrw`**（普通模块依赖；本地由工作区 `go.work` 指向工作副本，CI 用 `go.mod` 的伪版本）：本仓不提供 `core`，也不要自己实现拦截器。

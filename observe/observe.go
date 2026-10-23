@@ -7,7 +7,6 @@ package observe
 
 import (
 	"context"
-	"encoding/json"
 	"log/slog"
 	"net/http"
 	"time"
@@ -15,6 +14,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 
 	"github.com/lhdbsbz/szrw/core"
+	"github.com/lhdbsbz/szrw/log"
 )
 
 // Install 装上默认访问日志。重复调用无副作用。
@@ -59,10 +59,9 @@ func (slogObserver) Unary(ctx context.Context, method string, req any, dur time.
 	if err != nil {
 		fields = append(fields, slog.String("error", err.Error()))
 		// 失败才带请求体：成功路径带会让日志体积随流量爆炸。
+		// log.JSON 会把 bytes 字段折叠成 "<N bytes>"，8MiB 图片不会变成整段 base64。
 		if req != nil {
-			if raw, mErr := json.Marshal(req); mErr == nil {
-				fields = append(fields, slog.String("request", string(raw)))
-			}
+			fields = append(fields, slog.String("request", log.JSON(req)))
 		}
 		slog.ErrorContext(ctx, method, fields...)
 		return

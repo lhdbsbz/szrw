@@ -34,7 +34,7 @@
   「发到哪个后端」由 `OTEL_EXPORTER_OTLP_ENDPOINT` 决定，框架不内置 Jaeger/Tempo 依赖。
 - **进程内调用只留一份证据**：目标地址是 loopback 时，caller 侧不起 span、不记日志
   （没有网络跳，服务端那条就是它）。同一个事实不说两遍；跨进程调用才两側都有。
-- **不引入 logger / ORM / MQ / 配置**。`Observer` 只把事件交出去；`observe` 用标准库 slog。
+- **不引入第三方 logger / ORM / MQ / 配置**。`Observer` 只把事件交出去；`observe` 用标准库 slog，`log` 是 slog 之上的门面（不引依赖），`sqlx` 只把 SQL 参数内联进日志（不执行 SQL）。
 - **配套设施要给默认实现，不能只留空钩子**。`observe.Install()` + `metrics.Install()` +
   `health.Handler()` 三行就要能让新项目拿到 trace、日志、指标、探针；产品想换成自己的
   再用钩子覆盖——「提供默认」与「强制唯一」是两件事。
@@ -57,9 +57,9 @@
 ```bash
 go build ./... && go vet ./...
 
-# 用真实项目验证（生成物会引用本包的 6 个符号）
+# 用真实项目验证（生成物会引用本包的符号）
 cd ../service && ./build.ps1 -ProtoOnly
-cd ../szrw-service-template && ./scripts/gen.ps1 && go build ./...
+cd template && ./scripts/gen.ps1 && go build ./...
 ```
 
 ## 生成器与运行时分不开

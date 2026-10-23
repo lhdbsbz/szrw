@@ -19,6 +19,7 @@ proto/**/*.proto ──scripts/generate.sh──┬─> gen/proto/**            
                                         ├─> gen/local_service_center/**  Register<X>Service / Get<X>Service()
                                         ├─> gen/wiring/wiring_gen.go     BootAll / Gate / RegisterGateways
                                         ├─> gen/startup/startup.go       启动钩子类型（startup.Func）
+                                        ├─> gen/frontends.json          前端站点清单（构建脚本读它）
                                         └─> codegen.yaml 的 frontend_api.targets 目录
                                             <serviceLower>Api.{ts,js} + grpcGatewayHelper.{ts,js}
 microservice/<域>/   var Service + Main(ctx, start) + 一 rpc 一个文件
@@ -40,8 +41,58 @@ microservice/<域>/   var Service + Main(ctx, start) + 一 rpc 一个文件
 | protoc 调用层、`gen/` 原子替换 | `scripts/generate.sh` |
 | 身份传播 / span / 观察点 / 注册表 / 停机 | `core` |
 | 网关 mux 与 JSON 口径 | `gateway` |
+| 日志门面 / 安全 JSON | `log` |
+| 静态站点与 SPA 的缓存头、路径安全 | `webstatic` |
+| 分布式锁协议（驱动无关） | `lock` |
+| SQL 参数内联（只用于日志） | `sqlx` |
 
-## 2. 目录与命名
+## 2. 目录、命名与什么进框架
+
+### 2.1 吸纳判据
+
+框架只收「所有项目必须一致才不出错」的机制。三条判据里第一条是硬约束，后两条任一成立就该收：
+
+| 判据 | 说明 |
+| --- | --- |
+| 不拥有被引用的类型 | 不 import 业务 proto，不 import ORM / 驱动 / 供应商 SDK；参数与返回值是接口或标准库类型，换驱动不用改框架 |
+| 只有一种正确实现 | 两种写法里必有一处错（trace 传播、JSON 口径、缓存头、锁释放顺序），「各写一份」本身就是 bug |
+| 已经有人在重复，或框架自己写错 | 两份实现就收一份；框架里的错必须在一处修，否则每个项目重付一次 |
+
+红线（命中任一条就不收）：
+
+- **配置一键改行为的策略**：重试次数、默认超时、日志级别与格式、轮转保留几天。做成 `Options` 或钩子（项目在装配时给），不做 `if config.xxx`。
+- **绑供应商 / 拓扑 / 凭证**：Redis 客户端、ORM、MQ、对象存储、OTLP 后端、连接串。框架不 import 它们，也不假设单机还是集群。
+- **只服务单一产品**：SSO 白名单、业务字段、某个后台页面。产品事实留在项目仓。
+
+驱动绑定的东西靠接口适配：框架定协议，项目给适配器。`lock.Client` 是范例——框架只要求 `SetNX` 与 `EvalInt` 两个方法，go-redis 适配器在项目里，框架不 import 任何 Redis 库。
+
+### 2.2 目录三态
+
+服务的唯一判据是 **proto 里有 `service` 声明**；目录名、包名、有没有 `var Service` 都不算。
+
+| 形态 | 判据 | 规则 |
+| --- | --- | --- |
+| 真服务 | `proto/<目录>/*.proto` 声明了 `service` | 实现目录与 proto 目录同名；`var Service` + `Main(ctx, start)`；一个 rpc 一个文件；service 名全局唯一 |
+| 服务内实现子包 | 位于某个服务目录内部（更深一层） | 不注册服务、没有 `Main`；可以有 `var Service` 当命名空间；同服务可以直接 import |
+| 命名空间 | 只做分组、自身不声明 service 的一层 proto 目录 | 子目录各自是服务；只允许一层且必须显式登记（登记在项目守卫里）；子目录的服务名不得重复 |
+
+- 命名空间不是「目录分类」，是登记过的事实；当前使用方只有 `open_api`，其服务名带 `Open` 前缀（`OpenMemoryService`），避免与进程内同名服务打架。
+- 四条机械检查（正向：每个 proto service 有实现；反向：每个一层实现目录要么是服务、要么是命名空间；命名空间白名单；service 名唯一）由使用方项目的 `contracts` 守卫做；生成器另一侧只查跨域 import 与被直接 import 的子包是否注册了服务。两边都不靠 review。
+- 目录漂移是渐进的：先把「模块」挂在别的服务下，然后一半 RPC 变成一行转发。所以判定要写成测试。
+
+### 2.3 已吸纳的包
+
+| 包 | 一行用法 |
+| --- | --- |
+| `log` | `log.Init(log.Options{Level: lvl, JSON: true, Out: w, AddSource: true})` 装配全局 slog；`log.WithContext(ctx)` 自动带 `trace_id`/`span_id`/`parent_span_id`；`log.JSON(v)` 安全序列化（`[]byte` 折成 `<N bytes>`，深度/长度封顶）。级别过滤走 `Handler.Enabled`，`log.Level()` 运行期可改。 |
+| `webstatic` | `webstatic.Handler(webstatic.Options{FS: siteFS, SPA: true})` 服务一个站点产物目录：html `no-store`、`/assets/**` immutable、其余 `must-revalidate` + ETag/304；路径穿越 404 且不回落；SPA 回落只对无扩展名、非 asset 的路径。 |
+| `lock` | `lock.New(client, key, ttl)` + `TryLock`/`Lock`/`Unlock`/`Extend`，`lock.Once` 是抢占一次的形式；token + Lua 校验释放、ttl/3 续期；未持有 `ErrNotHeld`，持有期间丢了 `ErrLostLock`。 |
+| `sqlx` | 只用于日志与排障：`sqlx.Inline(query, args)` 把 `?` 换成可复制的参数，`sqlx.Truncate(s, max)` 头尾保留截断。它不执行 SQL，也不做 ORM。 |
+| `scripts/build-host.{ps1,sh}` | 发布链的宿主层：项目脚本 dot-source 它，只给四个事实（镜像变量、bake 文件、bake target、是否多站点 staging）再调用一次；attestation、builder 镜像、三个固定挂载、load/push 在壳里（细节见 §8）。 |
+
+包一旦吸进来，项目不再各写一份；驱动/供应商相关的部分留在项目侧适配器里。
+
+### 2.4 目录与命名的落点
 
 | 路径 | 谁写 | 规则 |
 | --- | --- | --- |
@@ -55,6 +106,9 @@ microservice/<域>/   var Service + Main(ctx, start) + 一 rpc 一个文件
 | `gen/wiring/wiring_gen.go` | 生成 | `BootAll` / `Gate` / `RegisterGateways` / `StreamingGatewayMethods` |
 | `microservice/<域>/rpc.go` | 生成一次 | `var Service` / `Main(ctx, start)` / `ServiceServer`，之后归你 |
 | `microservice/<域>/<rpc_snake>.go` | 生成一次 | 一 rpc 一个文件，文件名 = rpc 名的 snake_case |
+| `microservice/<域>/<子包>/` | 你写 | 服务内实现子包：不注册服务、无 `Main`；服务可以 import 自己的子包 |
+| `proto/<命名空间>/<子域>/` | 你写 | 仅限登记过的命名空间（如 `open_api`）；子目录各自是服务 |
+| `gen/frontends.json` | 生成 | 前端站点清单；构建脚本读它，别在项目脚本里另写一套探测 |
 | `web/<站点>/` | 你写 | 目录名 = 子域名 = 产物目录名 |
 | `mobile/<产品键>/` | 你写 | 目录名 = 产品键（与 `web/<子域名>` 同键），不是技术栈名 |
 
@@ -120,7 +174,7 @@ microservice/<域>/   var Service + Main(ctx, start) + 一 rpc 一个文件
 | 列表 | 该域 proto 的 `common.PageInfoReq/Resp` + 项目 `utils` 归一 | PAGE 模式必须回 `total` |
 | 游标列表 | 该消息自己的锚点字段 + `hasMore`/`next*` | 显式例外，须在项目 contracts 的 allowlist 登记 |
 | 跨域读/写 | `local_service_center.Get<X>Service()` + 对方 proto | 事务参与接口显式传 session |
-| 域内复用（无 service） | `microservice/<域>/<subpkg>/` | 子包**绝不**注册服务（生成器会查） |
+| 服务内实现子包（无 service） | `microservice/<域>/<subpkg>/` | 不注册服务、没有 `Main`；被直接 import 的子包注册服务会被生成器判失败 |
 | 异步可靠事件 | 生产方 proto 事件 + outbox + 集中 topic 常量 | 同事务入队；消费幂等 |
 | 管理后台页 | 站点 `views/` + router 菜单 | 后台 RPC 用 `Admin` 前缀 + 项目鉴权 |
 | 新前端站点 | `web/<name>/` | 目录名 = 子域名 = 产物目录名；要登录就注册 SSO client |
@@ -201,7 +255,8 @@ microservice/<域>/   var Service + Main(ctx, start) + 一 rpc 一个文件
 | --- | --- | --- |
 | `core` | 进程内注册表 `GlobalRegistry`（`RegisterAddr`/`GetClient`/`Discover`/`MustDiscover`）、`MaxMsgSize`（32MiB）、四个拦截器（身份传播 + span + panic 恢复 + 观察点）、`SetPropagator`/`AddObserver`/`SetDefaultTimeout`、`ShutdownContext` | 自己写注册表、拦截器、信号处理、trace 传播 |
 | `gateway` | mux 装配与唯一 JSON 口径（camelCase + EmitUnpopulated + 枚举用名字 + 反序列化忽略未知字段）；纯 server-streaming 按 SSE 直出；三个钩子 `RewriteResponse`/`WriteError`/`OutgoingHeader` | 另建 mux、另解一次信封、另定 JSON 口径 |
-| `observe` | 默认访问日志（每次 RPC 一条 slog，带 `trace_id`/`span_id`）+ HTTP 入口根 span + `X-Trace-Id` 回写 | 再写一套访问日志中间件 |
+| `observe` | 默认访问日志（每次 RPC 一条 slog，带 `trace_id`/`span_id`；请求 payload 经 `log.JSON` 折叠，大二进制不会整段进日志）+ HTTP 入口根 span + `X-Trace-Id` 回写 | 再写一套访问日志中间件 |
+| `log` | 全局 slog 门面：`Init(Options{Level, JSON, Out, AddSource})`、`WithContext` 自动带 `trace_id`/`span_id`/`parent_span_id`、`JSON` 安全序列化（`[]byte` 折成 `<N bytes>`、深度/长度封顶）、`Level()` 运行期改级别 | 另引第三方 logger、自己拼 trace 字段、把 payload 原样 `fmt`/`json.Marshal` 进日志 |
 | `tracing` | W3C `traceparent`/`baggage` 传播 + TracerProvider；设 `OTEL_EXPORTER_OTLP_ENDPOINT` 才导出，`OTEL_SERVICE_NAME` 定服务名 | 自定义头名/编码，自造 trace id |
 | `metrics` | RED 指标 `szrw_rpc_requests_total`/`szrw_rpc_duration_seconds`（`method`/`kind`/`code` 标签）+ Go 运行时指标 + `Handler()` | 自己统计 RPC 次数/耗时 |
 | `health` | `Register(name, check)` + `Handler()`：不注册=存活，注册了=就绪（3s 超时，失败 503 并列出失败项） | 自己写探针形状 |
@@ -209,7 +264,7 @@ microservice/<域>/   var Service + Main(ctx, start) + 一 rpc 一个文件
 
 - **契约**（不可替换）：注册表、`MaxMsgSize`、`TraceKey`、四个拦截器、`StartSpan`/`ExtractTraceHTTP`、`ShutdownContext`、`gateway.New` 的 JSON 口径与流式直出、`health.Handler` 的响应形状。
 - **扩展点**（内容由项目给）：`Propagator`、`Observer`（可叠加）、`SetDefaultTimeout`、`gateway.Options` 的三个函数、`health.Register`。
-- **参考实现**（可整体替换）：`observe`、`metrics`。它们只是「新项目什么都不写也能跑」的默认内容；换成自己的就忽略它们，不是去配置它们。
+- **参考实现**（可整体替换）：`observe`、`metrics`。它们只是「新项目什么都不写也能跑」的默认内容；换成自己的就忽略它们，不是去配置它们。`log` 是门面不是契约：换第三方 logger 时整体替换，但日志里的 trace 字段必须来自当前 span。
 - 默认超时只补一元调用（0 = 不补）；流的生命周期由业务决定，流不封顶。
 - 进程内调用（loopback）caller 侧不起 span、不记日志：没有网络跳，服务端那条已经说完了同一件事。跨进程调用两侧都有。
 - `tracing.Install(obs.Processor())` 必须在 `obsdb.Open` 之后、任何 span 之前：provider 按 tracer 名缓存 processor 列表，晚注册的链路 span 全丢。
@@ -269,7 +324,9 @@ root.Handle("/metrics", metrics.Handler())          // 只给内网或反代白�
 - 它做全部固定动作：五个 protoc 插件（`go`/`go-grpc`/`go-json`/`grpc-gateway` 四个公开插件 + 框架自己的 `protoc-gen-szrw-codegen`）与固定选项、`gen/` 原子替换（失败先还原，坏 proto 不会把仓删空）、proto 契约校验。项目脚本里**只留一行调用**。
 - 本项目插件从挂载的框架源码 `go install`，所以改生成器不必先发布。
 - 宿主只需要 Docker：没有 protoc 就在 `szrw-builder` 镜像里跑（镜像由 `Dockerfile.builder` + `scripts/build-builder.sh` 构建，Go/Node/protoc 版本是它的 `ARG`）。项目不自带工具链镜像。
-- 项目侧脚本只是一层壳，开关语义固定：生成（`-ProtoOnly`）、只校验（`-ValidateOnly`，即 `--check`，不动前端）、补骨架（`-Scaffold`）、不推送（`-SkipPush`）。模板里它叫 `scripts/gen.ps1`（只需要生成与 `-Scaffold`），带镜像与发布的项目叫 `build.ps1` / `build.sh`（同名同参）。`-ProtoOnly` 不等于跑完契约测试：项目自己的 `contracts` 测试要在改 proto/模型的提交前单独跑。
+- **发布链的机制在框架的 `scripts/build-host.ps1` / `build-host.sh`**：项目脚本 dot-source 它，只给四个事实（镜像变量、bake 文件、bake target、是否多站点 staging）再调用一次 `Invoke-SzrwBuild` / `szrw_invoke_build`。壳负责关 attestation、确保 builder 镜像、三个固定挂载（repo / szrw / cache）与 `--load`/`--push`；新项目不要把这几件事再抄进 `build.ps1`。
+- 前端站点清单是生成物 `gen/frontends.json`（生成器按「`web/<name>` 有 `package.json` 且根目录或 `apps/*/` 下有 `vite.config.{ts,js}`」写入）。脚本侧的唯实现是 `scripts/frontends.sh`：读清单，清单缺失才回退探测；清单与磁盘不一致只说明忘了跑生成，不是配置项。
+- 项目侧脚本只是一层壳，开关语义固定：生成（`-ProtoOnly`）、只校验（`-ValidateOnly`，即 `--check`，不动前端）、补骨架（`-Scaffold`）、不推送（`-SkipPush`）。模板里生成壳叫 `scripts/gen.ps1`（只需要生成与 `-Scaffold`），发布壳叫 `build.ps1` / `build.sh`（同名同参，dot-source `scripts/build-host.*`）。`-ProtoOnly` 不等于跑完契约测试：项目自己的 `contracts` 测试要在改 proto/模型的提交前单独跑。
 - `codegen.yaml` 的边界：**只描述生成物在哪、长什么样，不描述业务语义**。未知键、版本不符、越界路径一律失败；加一个业务开关就等于把业务写进生成器。
 - 生成物入库（`gen/`、前端客户端、ts-proto 类型），编译产物不提交（`main`、站点产物目录）。
 

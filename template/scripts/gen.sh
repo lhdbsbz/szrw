@@ -12,9 +12,10 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 CODEGEN="${CODEGEN:-..}"
-[[ -x "${CODEGEN}/scripts/generate.sh" ]] || {
+# 用 -f 而不是 -x：Windows 检出没有 exec bit，靠 bash 显式调用。
+[[ -f "${CODEGEN}/scripts/generate.sh" ]] || {
     echo "找不到框架生成脚本: ${CODEGEN}/scripts/generate.sh（用 CODEGEN=... 指定框架仓路径）" >&2
     exit 1
 }
 
-"${CODEGEN}/scripts/generate.sh" "$@"
+bash "${CODEGEN}/scripts/generate.sh" "$@"

@@ -2,7 +2,7 @@
 
 框架的**运行时契约**：生成物要求的那几个符号，以及所有项目都必须一致的机制。
 
-只放「两边必须一致才不出错」的东西，不放业务、不放驱动、不放日志格式。
+只放「两边必须一致才不出错」的东西，不放业务、不放驱动、不放日志后端。
 
 ```
 core/       GlobalRegistry、MaxMsgSize、四个拦截器、span 生成与传播、默认超时、ShutdownContext
@@ -12,6 +12,10 @@ tracing/    OpenTelemetry TracerProvider；配 OTEL_EXPORTER_OTLP_ENDPOINT 才�
 metrics/    RED 指标（次数/耗时），Prometheus 文本格式，带 Go 运行时指标
 obsdb/      本次运行的 span + 日志写本地 SQLite（重启换新库，单库 500MB×3 轮转）
 health/     存活/就绪探针：不注册检查=存活，注册了=就绪（MySQL/Redis 断了就 503）
+log/        slog 门面：级别/输出装配、WithContext 带 trace 字段、JSON 安全序列化（大二进制折叠、深度封顶）
+webstatic/  SPA/静态站点 Handler：缓存头矩阵、路径穿越拒绝、ETag/304、SPA 回落规则
+lock/       分布式互斥锁协议（不绑驱动）：token + Lua 校验释放、ttl/3 续期
+sqlx/       只用于日志的 SQL 参数内联与头尾截断，不执行 SQL
 ```
 
 ## 追踪走标准，不用自造格式
@@ -102,8 +106,8 @@ QPS/延迟曲线、探针只能探测「进程还活着」。
 ## 不做的事
 
 - 不定义调用主体的形状（那是项目自己的结构）
-- 不定义日志格式、不引入 logger
-- 不碰 ORM / MQ / 配置
+- 不定义日志后端与采集：`log` 只包标准库 slog，格式开关是门面的选项，落盘/轮转/采集器归项目
+- 不碰 ORM / MQ / 配置（`sqlx` 只把 SQL 参数内联进日志，不执行 SQL）
 - 不提供启动骨架：`wiring.BootAll` 已经保证了后台循环的放行时机，启动顺序里
   其余步骤（配置、基础设施、业务预热）都是项目事实
 
@@ -115,6 +119,8 @@ QPS/延迟曲线、探针只能探测「进程还活着」。
 cmd/protoc-gen-szrw-codegen/   protoc 插件（一个二进制，按 registry/frontend_api 分派）
 internal/{config,registrygen,frontendgen,validate,naming,httpx}/
 scripts/generate.sh            项目侧唯一要调的一行（生成 + gen/ 原子替换 + 规则校验）
+scripts/build-host.{ps1,sh}    发布链的宿主层（dot-source）：attestation、builder 镜像、三个固定挂载、load/push
+scripts/frontends.sh           前端站点谓词的 shell 实现（读 gen/frontends.json）
 scripts/build-builder.sh       构建工具链镜像
 Dockerfile.builder             Go + Node + protoc 的唯一来源
 ```

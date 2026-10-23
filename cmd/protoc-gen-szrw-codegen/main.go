@@ -45,6 +45,16 @@ func main() {
 			}
 		}
 
+		// 前端站点清单：脚本据此挂 node_modules 卷、打包产物，不再自己探测 vite.config.*。
+		// 与 registry/frontend_api 两段无关：后端-only 项目也会拿到 sites: []。
+		manifest, err := frontendgen.Manifest(".")
+		if err != nil {
+			return fmt.Errorf("前端站点清单: %w", err)
+		}
+		if _, err := gen.NewGeneratedFile(frontendgen.ManifestPath, "").Write(manifest); err != nil {
+			return fmt.Errorf("写入 %s: %w", frontendgen.ManifestPath, err)
+		}
+
 		return nil
 	})
 }

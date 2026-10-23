@@ -18,9 +18,10 @@ curl -X POST localhost:8080/grpc-gateway/GreeterService/SayHello -d '{"name":"sz
 | `proto/**/*.proto` | **你写** | 唯一的契约来源。`google.api.http` 注解决定 HTTP 路由 |
 | `codegen.yaml` | 你写 | 只描述生成物的位置与形状；默认值就是标准布局 |
 | `gen/proto/**` | protoc 官方插件 | `--go_out` / `--go-grpc_out` / `--grpc-gateway_out` |
-| `gen/local_service_center/` | `protoc-gen-szrw` | 每服务一个注册文件 + 客户端获取 |
+| `gen/local_service_center/` | `protoc-gen-szrw-codegen` | 每服务一个注册文件 + 客户端获取 |
 | `gen/wiring/wiring_gen.go` | 同上 | `BootAll`（注册全部服务）+ `Gate`（启动放行）+ `RegisterGateways`（路由） |
 | `gen/startup/startup.go` | 同上 | 启动钩子契约（只有类型） |
+| `gen/frontends.json` | 同上 | 前端站点清单（构建脚本读它；本模板没有站点，所以是空列表） |
 | `microservice/<域>/rpc.go` | 同上（`--scaffold` 时补缺失） | `var Service` / `Main` / `ServiceServer` |
 | `microservice/<域>/<rpc_snake>.go` | 同上（缺失时） | 一 rpc 一个文件，签名 + `codes.Unimplemented` |
 | `main.go` | **你写**（约 3 句） | 只做：`BootAll` → `RegisterGateways` → `http.Server` |
@@ -48,10 +49,10 @@ proto 契约规则住在生成器里（缺省开启，没有开关），
 ## 生成
 
 前置：`protoc` + `protoc-gen-go` / `protoc-gen-go-grpc` / `protoc-gen-grpc-gateway` /
-`protoc-gen-szrw` 在 `PATH`。
+`protoc-gen-szrw-codegen` 在 `PATH`。
 
 ```bash
-go install github.com/lhdbsbz/szrw/cmd/protoc-gen-szrw@latest
+go install github.com/lhdbsbz/szrw/cmd/protoc-gen-szrw-codegen@latest
 ./scripts/gen.sh
 ```
 
@@ -79,7 +80,7 @@ staticcheck/deadcode/govulncheck），定义在 `szrw/Dockerfile.builder`，先�
 生成器本身从 `-Codegen` 指的源码目录 `go install`，所以改生成器不必先发布。
 
 `codegen.yaml` 只有两段（段存在 = 生成），**没有任何布局开关**：`registry: {}` + 可选
-`frontend_api.targets`。加 RPC 时模板脚本传 `scaffold=write` 补骨架；CI 不传，缺实现即失败。
+`frontend_api.targets`。加 RPC 时模板脚本传 `--scaffold`（`-Scaffold`）补骨架；不传就是 check，缺实现即失败。
 
 ## 加一个域
 
@@ -124,15 +125,54 @@ staticcheck/deadcode/govulncheck），定义在 `szrw/Dockerfile.builder`，先�
 
 `/healthz`、`/metrics` 挂在网关**外**（它们不是 RPC）；`/metrics` 只给内网或反代白名单。
 
+## 构建与发布
+
+发布链分两层，项目只有一层壳：
+
+| 文件 | 谁负责 | 写什么 |
+| --- | --- | --- |
+| `build.ps1` / `build.sh` | 项目 | 四个事实（镜像变量、bake 文件、bake target、是否多站点 staging）+ 一次 `Invoke-SzrwBuild` / `szrw_invoke_build` |
+| `Dockerfile` + `Dockerfile.dockerignore` | 项目 | 产物-only 白名单（只拷 `main`） |
+| `docker-bake.hcl` | 项目 | 镜像变量 `SZRW_TEMPLATE_IMAGE`、平台、attestation 说明 |
+| `../szrw/scripts/build-host.{ps1,sh}` | 框架（dot-source） | 关 attestation、确保 builder 镜像、三个固定挂载、`--load`/`--push` |
+
+```powershell
+.\build.ps1              # 生成 → 交叉编译 main → bake 镜像 → push
+.\build.ps1 -SkipPush    # 只构建
+```
+
+```bash
+./build.sh --skip-push
+```
+
+新项目要写的只有「dot-source 框架脚本 + 一个 `Invoke-SzrwBuild` / `szrw_invoke_build` 调用」。
+容器内的固定事实：`REPO_ROOT=/workspace/repo`、`WORKSPACE_DIR=/workspace`、`CODEGEN=/workspace/szrw`，
+一个缓存卷挂在 `/cache`（npm / go-mod / go-build 都在里面）。
+前端站点清单由生成器写到 `gen/frontends.json`（本模板没有前端，所以是空列表）；
+脚本读清单，清单缺失时才按同一谓词回退探测。
+
+镜像仓库若拒绝 BuildKit attestation（阿里云 ACR 个人版），不要在项目里另加开关：
+框架层已固定 `BUILDX_NO_DEFAULT_ATTESTATIONS=1` + `--provenance=false --sbom=false`，
+builder 镜像的构建也走同一套。
+
+## 新增包放哪
+
+- 框架已吸纳的机制直接用，不复制进本仓：`szrw/log`（slog 门面 + 安全 JSON）、`szrw/webstatic`（站点 Handler）、`szrw/lock`（锁协议）、`szrw/sqlx`（SQL 日志内联）。
+- 本仓自己的横切工具（本产品的错误口径、请求辅助、业务规则）放 `pkg/`。
+- 驱动相关的适配器也留在项目侧：框架定协议，项目给驱动。`lock.Client` 是范例——框架只要求 `SetNX` + `EvalInt`，Redis 适配器放 `pkg/<driver>/`。
+
 ## 目录
 
 ```
 proto/                契约（common + greeter：{dir}.proto 写接口，{dir}_core_model.proto 写实体）
 proto_third/          protoc 需要的第三方 proto（google/api）
-gen/                  生成物，可整体删除重建
+gen/                  生成物，可整体删除重建（含前端清单 frontends.json）
 microservice/greeter/ 实现：rpc.go + 一 rpc 一个文件
 contracts/            项目自己的口径守卫（生成器拦不住的约定）
-pkg/                  本项目的运行时扩展点（框架不提供）
-scripts/              生成脚本
+pkg/                  本产品的横切工具与驱动适配器（框架已吸纳的机制不在这里复制）
+scripts/              生成脚本（gen.sh / gen.ps1）
+build.ps1 / build.sh  发布链的项目段（四个事实 + 一次调用）
+Dockerfile            alpine + 只拷 main
+docker-bake.hcl       镜像变量 SZRW_TEMPLATE_IMAGE + 平台
 main.go               装配入口
 ```

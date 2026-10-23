@@ -1,6 +1,7 @@
 # 生成物（gen/ 提交，方便 review 与离线构建）
-sites/
 *.exe
 *.log
+# 编译产物：build.ps1 / build.sh 在仓库根产出 main，镜像 COPY 它，不提交
+/main
 # 生成失败时的临时备份（gen/ 先挪走再生成，失败会换回来）
 gen.prev

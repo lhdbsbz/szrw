@@ -20,7 +20,8 @@ $GenArgs = if ($Scaffold) { '--scaffold' } else { '' }
 
 # 单行 bash 命令 + 参数数组：多行 here-string 或未加引号的变量会被 PowerShell
 # 按空格拆成多个参数，docker 收到后 bash 只会看到 -c 后面缺参数。
-$Cmd = "set -e; cd /work; /workspace/szrw/scripts/generate.sh $GenArgs".Trim()
+# 用 `bash <脚本>` 而不是直接执行：Windows 检出的 generate.sh 没有 exec bit。
+$Cmd = "set -e; cd /work; bash /workspace/szrw/scripts/generate.sh $GenArgs".Trim()
 
 # 注意：不能叫 $Args，那是 PowerShell 的自动变量。
 $DockerArgs = @(
