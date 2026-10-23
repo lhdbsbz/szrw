@@ -349,3 +349,149 @@ func TestHistogramQuantileSupport(t *testing.T) {
 		t.Fatalf("空直方图应为 0，got %v %v %v", p50, p95, p99)
 	}
 }
+
+// TestClientErrorSplitFromServerError 是「404 被算成服务端故障」的回归：
+//
+// 生产症状：扫描器打 /api/graphql、/api/uploads/../../.env 等不存在的路径，返回 404，
+// 看板显示错误率 100%。4xx 是客户端错误（探测/鉴权失败/参数不合法），不是服务端故障；
+// 5xx / gRPC 非 0 才是。这里一条 404 + 一条 500 混在一起：
+// ErrorCount 只能含 500，ClientErrorCount 只能含 404，且 404 不出现在错误列表里。
+func TestClientErrorSplitFromServerError(t *testing.T) {
+	s, err := Open(Options{Dir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	base := time.Now().Add(-time.Minute).UnixNano()
+	// 未匹配路由：网关把 span 名折叠成 <unmatched>，真实路径留在属性里（库里仍存原文）。
+	pushSpan(s, Span{TraceID: "t-404", SpanID: "s-404", Name: UnmatchedEntry,
+		Service: "gateway", Protocol: "HTTP", Status: "SUCCESS", StatusCode: "404",
+		StartNS: base, EndNS: base + int64(2*time.Millisecond),
+		Attrs: map[string]any{UnmatchedPathAttr: "/api/uploads/../../.env"}})
+	// 真实故障：网关 500，span 自己也标了 ERROR（被上面 ERROR 分支兜住）。
+	pushSpan(s, Span{TraceID: "t-500", SpanID: "s-500", Name: "POST /grpc-gateway/TradeService/CreateOrder",
+		Service: "gateway", Protocol: "HTTP", Status: "ERROR", StatusCode: "500",
+		StartNS: base + int64(10*time.Millisecond), EndNS: base + int64(60*time.Millisecond)})
+
+	time.Sleep(400 * time.Millisecond)
+
+	window := Window{FromNS: base - int64(time.Second), UntilNS: base + int64(time.Minute)}
+	report, err := s.RED(context.Background(), RedQuery{Window: window, Buckets: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Total.Count != 2 || report.Total.ErrorCount != 1 || report.Total.ClientErrorCount != 1 {
+		t.Fatalf("RED 汇总应为 count=2 err=1 clientErr=1，got count=%d err=%d clientErr=%d",
+			report.Total.Count, report.Total.ErrorCount, report.Total.ClientErrorCount)
+	}
+	var sumErr, sumClientErr int64
+	for _, p := range report.Total.Points {
+		sumErr += p.ErrorCount
+		sumClientErr += p.ClientErrorCount
+	}
+	if sumErr != 1 || sumClientErr != 1 {
+		t.Fatalf("趋势桶的错误计数应与汇总一致，got err=%d clientErr=%d", sumErr, sumClientErr)
+	}
+	byName := make(map[string]RedSeries, len(report.Series))
+	for _, sr := range report.Series {
+		byName[sr.Name] = sr
+	}
+	if got := byName[UnmatchedEntry]; got.Count != 1 || got.ErrorCount != 0 || got.ClientErrorCount != 1 {
+		t.Fatalf("<unmatched> 系列应只算客户端错误: %+v", got)
+	}
+
+	page, err := s.RequestTraces(context.Background(), TraceFilter{Window: window, Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.Total != 2 {
+		t.Fatalf("404 仍是一次请求（进 total），got %d", page.Total)
+	}
+	var row404, row500 *TraceRow
+	for i := range page.Rows {
+		switch page.Rows[i].TraceID {
+		case "t-404":
+			row404 = &page.Rows[i]
+		case "t-500":
+			row500 = &page.Rows[i]
+		}
+	}
+	if row404 == nil || row500 == nil {
+		t.Fatalf("两条请求都应在列表里: %+v", page.Rows)
+	}
+	if row404.Status != "CLIENT_ERROR" || row404.ErrorSpans != 0 {
+		t.Fatalf("404 必须是 CLIENT_ERROR 且不计入 ErrorSpans: %+v", *row404)
+	}
+	if row404.Entry != UnmatchedEntry || row404.Path != "/api/uploads/../../.env" {
+		t.Fatalf("折叠行应保留入口名与真实路径: %+v", *row404)
+	}
+	if row500.Status != "ERROR" || row500.ErrorSpans != 1 {
+		t.Fatalf("500 必须仍是 ERROR: %+v", *row500)
+	}
+
+	// 错误筛选只出 500，404 不在里面。
+	onlyErr, err := s.RequestTraces(context.Background(), TraceFilter{Window: window, Status: "ERROR", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if onlyErr.Total != 1 || len(onlyErr.Rows) != 1 || onlyErr.Rows[0].TraceID != "t-500" {
+		t.Fatalf("错误列表只应有 500: total=%d rows=%+v", onlyErr.Total, onlyErr.Rows)
+	}
+	onlyClient, err := s.RequestTraces(context.Background(), TraceFilter{Window: window, Status: "CLIENT_ERROR", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if onlyClient.Total != 1 || len(onlyClient.Rows) != 1 || onlyClient.Rows[0].TraceID != "t-404" {
+		t.Fatalf("客户端错误筛选只应有 404: total=%d rows=%+v", onlyClient.Total, onlyClient.Rows)
+	}
+	onlyOK, err := s.RequestTraces(context.Background(), TraceFilter{Window: window, Status: "SUCCESS", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if onlyOK.Total != 0 {
+		t.Fatalf("SUCCESS 不应包含 404/500，got %d", onlyOK.Total)
+	}
+
+	// 排除探测：<unmatched> 整行消失，真实接口还在。
+	noProbe, err := s.RequestTraces(context.Background(), TraceFilter{Window: window, ExcludeProbes: true, Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if noProbe.Total != 1 || len(noProbe.Rows) != 1 || noProbe.Rows[0].TraceID != "t-500" {
+		t.Fatalf("排除探测后只应有真实接口: total=%d rows=%+v", noProbe.Total, noProbe.Rows)
+	}
+	// 关键词能匹配到折叠掉的真实路径（证据没丢）。
+	byPath, err := s.RequestTraces(context.Background(), TraceFilter{Window: window, Keyword: ".env", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if byPath.Total != 1 || len(byPath.Rows) != 1 || byPath.Rows[0].TraceID != "t-404" {
+		t.Fatalf("应能按真实路径搜到折叠行: total=%d rows=%+v", byPath.Total, byPath.Rows)
+	}
+}
+
+// TestFoldUnmatchedEntryOnlyBusinessPrefixes 钉住折叠范围：只有会进 RED/请求口径的业务前缀
+// （/api/、/grpc-gateway/、/service/api/）才折叠；SPA 页面路由与静态资源不折叠，
+// 否则页面加载会被塞进 <unmatched>，把 QPS 带偏。
+func TestFoldUnmatchedEntryOnlyBusinessPrefixes(t *testing.T) {
+	cases := []struct {
+		path string
+		want string
+		fold bool
+	}{
+		{"/api/graphql", UnmatchedEntry, true},
+		{"/api/uploads/../../.env", UnmatchedEntry, true},
+		{"/grpc-gateway/DiagnosticsService/Nope", UnmatchedEntry, true},
+		{"/service/api/payment/callback/nope", UnmatchedEntry, true},
+		{"/admin/login", "", false},
+		{"/assets/missing.js", "", false},
+		{"/", "", false},
+	}
+	for _, c := range cases {
+		got, fold := FoldUnmatchedEntry(c.path)
+		if got != c.want || fold != c.fold {
+			t.Fatalf("FoldUnmatchedEntry(%q) = (%q,%v)，期望 (%q,%v)", c.path, got, fold, c.want, c.fold)
+		}
+	}
+}

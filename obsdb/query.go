@@ -33,44 +33,114 @@ func isEntryExpr(alias string) string {
 	return fmt.Sprintf(`(%[1]sparent_span_id = '' OR (%[1]sprotocol = 'HTTP' AND %[1]sservice = 'gateway'))`, p)
 }
 
+// httpEntryPrefixes 是「非 grpc-gateway 的 HTTP 业务入口」前缀。
+//
+// 新增一个这样的入口时只改这里：requestEntryScope 的 SQL 与 FoldUnmatchedEntry
+// （网关把未匹配路由折叠成 <unmatched> 的判定）都从这里取，两边不会各写一份。
+var httpEntryPrefixes = []string{"/grpc-gateway/", "/service/api/", "/api/"}
+
 // requestEntryScope 是「一次业务请求」的入口口径：只认 gRPC 与 HTTP 业务接口。
 //
 // 排除静态资源、SPA 页面与 WS/SSE 长连接：
 //   - 浏览器加载一个页面会产生几十条静态请求，它们会稀释真正的 QPS；
 //   - 长连接的 span 时长是整个连接的生命周期（小时级），会把 P99 直接带偏。
 //
-// 新增「非 grpc-gateway 的 HTTP 入口」时，把前缀加到这里；漏加只会让该入口
-// 不出现在请求/RED 页面（日志与调用链仍可查），不会算错别的口径。
+// 未匹配路由的探测（入口名折叠为 UnmatchedEntry，见 FoldUnmatchedEntry）不管原始路径是什么都算进来：
+// 它们也是打进来的请求，扫描量本身就是要看的信号；不算会让「被扫」完全隐形。
+//
+// 漏加前缀只会让该入口不出现在请求/RED 页面（日志与调用链仍可查），不会算错别的口径。
 func requestEntryScope(alias string) string {
 	p := alias + "."
-	return fmt.Sprintf(`(%[1]s
-		AND (%[2]sname LIKE '/%%'
-			OR %[2]sname LIKE '%% /grpc-gateway/%%'
-			OR %[2]sname LIKE '%% /service/api/%%'
-			OR %[2]sname LIKE '%% /api/%%'))`, isEntryExpr(alias), p)
+	conds := []string{fmt.Sprintf("%sname LIKE '/%%'", p)} // gRPC 直连入口（名字以 / 开头）
+	for _, prefix := range httpEntryPrefixes {
+		conds = append(conds, fmt.Sprintf("%sname LIKE '%% %s%%'", p, prefix))
+	}
+	// 折叠后的探测行：名字已不是原始路径，靠固定值认。
+	conds = append(conds, p+"name = "+unmatchedEntryLiteral())
+	return fmt.Sprintf(`(%s AND (%s))`, isEntryExpr(alias), strings.Join(conds, " OR "))
 }
 
-// errorExpr 判断一条 span 是否算失败。
+// serverStatusCodeExpr 是「HTTP 状态码落在 5xx」这一条事实，serverErrorExpr 与
+// clientErrorExpr 都从它派生，保证两个口径互斥且覆盖 4xx/5xx 全集。
+func serverStatusCodeExpr(alias string) string {
+	return fmt.Sprintf(`%[1]s.protocol = 'HTTP' AND CAST(%[1]s.status_code AS INTEGER) >= 500`, alias)
+}
+
+func clientStatusCodeExpr(alias string) string {
+	return fmt.Sprintf(`%[1]s.protocol = 'HTTP' AND CAST(%[1]s.status_code AS INTEGER) >= 400
+		AND CAST(%[1]s.status_code AS INTEGER) < 500`, alias)
+}
+
+// errorExpr 判断一条 span 是否算「服务端错误」——看板上的错误率只认这一条。
 //
 // 网关的 5xx 不一定把 span 标成 ERROR（错误是写响应头，不是 return err），
 // 所以只看 status 会把「接口 500」算成成功；这里按状态码兜底：
-// HTTP >= 400，gRPC 非 0（gRPC 只在失败时才写 status_code）。
+// HTTP >= 500，gRPC 非 0（gRPC 只在失败时才写 status_code）。
+//
+// span status=ERROR 但不属于上面两条的（典型是网关把客户端错误翻成 err 后 RecordError，
+// 也可能是 4xx 之外的业务拒绝），如果不排除，404 会被算成服务端错误；
+// 所以「ERROR 且不是 HTTP 4xx」才算，HTTP 4xx 一律归 clientErrorExpr。
 func errorExpr(alias string) string {
-	return fmt.Sprintf(`(%[1]s.status = 'ERROR'
-		OR (%[1]s.protocol = 'HTTP' AND CAST(%[1]s.status_code AS INTEGER) >= 400)
+	return fmt.Sprintf(`(%[1]s.status = 'ERROR' AND NOT (%[2]s)
+		OR (%[3]s)
 		OR (%[1]s.protocol = 'GRPC' AND %[1]s.status_code <> '' AND %[1]s.status_code <> '0'))`,
-		alias)
+		alias, clientStatusCodeExpr(alias), serverStatusCodeExpr(alias))
 }
+
+// clientErrorExpr 判断一条 span 是否算「客户端错误」（HTTP 4xx）：扫描器探测、鉴权失败、
+// 请求体不合法都在这里。它是独立指标，不参与 errorExpr——把 404 算进错误率
+// 会让「被扫」看起来像「服务坏了」。
+func clientErrorExpr(alias string) string {
+	return fmt.Sprintf(`(%s)`, clientStatusCodeExpr(alias))
+}
+
+// unmatchedPathExpr 取折叠后保留的真实路径（见 UnmatchedPathAttr）。
+//
+// attrs 是 span 属性的 JSON 字面量，用 json_extract 取一个键（现代 SQLite 编译带了 JSON1）；
+// 键名带点，所以用 $."key" 的引号形式，不然会被当成两层路径。
+func unmatchedPathExpr(alias string) string {
+	return fmt.Sprintf(`COALESCE(json_extract(NULLIF(%[1]s.attrs, ''), '$."%[2]s"'), '')`,
+		alias, UnmatchedPathAttr)
+}
+
+// UnmatchedEntry 是「没匹配到任何 HTTP 路由」的入口名。
+//
+// 公网扫描器每天打出几千个不存在的路径，每个都会在请求列表/RED 里占一行；
+// 网关在请求结束时把这类 span 的名字改成它、真实路径写进 UnmatchedPathAttr，
+// 于是所有探测折叠成一行，计数还在，真实接口不再被淹掉。
+const UnmatchedEntry = "<unmatched>"
+
+// UnmatchedPathAttr 是折叠后保留真实路径的 span 属性名（截断见网关）。
+const UnmatchedPathAttr = "http.unmatched_path"
+
+// FoldUnmatchedEntry 决定一个「没匹配到任何 gin 路由」的请求要不要把入口名折叠成 UnmatchedEntry，
+// 要折叠时返回折叠后的名字与 true。
+//
+// 只折叠落在业务入口前缀下的路径（httpEntryPrefixes）：只有它们会进请求/RED 口径，也正好是扫描噪声的来源。
+// SPA 页面路由与静态资源不折叠——它们本来就被 requestEntryScope 排除，折叠了反而会把页面加载/资源请求
+// 塞进 <unmatched> 行，把 QPS 带偏。真实路径由网关写进 UnmatchedPathAttr，库里的 name 仍是原始路径（审计需要）。
+func FoldUnmatchedEntry(urlPath string) (string, bool) {
+	for _, prefix := range httpEntryPrefixes {
+		if strings.HasPrefix(urlPath, prefix) {
+			return UnmatchedEntry, true
+		}
+	}
+	return "", false
+}
+
+// unmatchedEntryLiteral 是 UnmatchedEntry 的 SQL 字面量（不可参数化：它在聚合子查询里）。
+func unmatchedEntryLiteral() string { return "'" + UnmatchedEntry + "'" }
 
 // TraceFilter 是「请求列表」的查询条件。筛选在 SQL 里做，分页在合并后做。
 type TraceFilter struct {
 	Window        Window
 	Service       string // 主服务（链路里最早 GRPC span 的 service）
-	Keyword       string // 入口名称模糊匹配
-	Status        string // SUCCESS / ERROR
+	Keyword       string // 入口名称模糊匹配（含未匹配路由的真实路径）
+	Status        string // SUCCESS / ERROR / CLIENT_ERROR
 	StatusCode    string // 精确状态码
 	MinDurationNS int64
 	SortBy        string // time | duration | status
+	ExcludeProbes bool   // 排除未匹配路由的探测请求（网关折叠后的 <unmatched>）
 	Limit, Offset int
 	SkipStats     bool // 只要列表/总数时跳过按服务的分布（概览页的慢请求计数）
 	CountOnly     bool // 只要 total，不取列表（概览页的慢请求计数）
@@ -78,27 +148,30 @@ type TraceFilter struct {
 
 // TraceRow 是请求列表的一行（按 trace 聚合）。
 type TraceRow struct {
-	TraceID    string
-	Entry      string // 根 span 名称
-	Service    string // 主服务
-	Protocol   string
-	Status     string // SUCCESS / ERROR（按状态码兜底后的口径）
-	StatusCode string
-	StartNS    int64
-	EndNS      int64
-	SpanCount  int64
-	ErrorSpans int64
-	LogCount   int64
-	RootError  int64
+	TraceID        string
+	Entry          string // 根 span 名称（未匹配路由时为 UnmatchedEntry）
+	Path           string // 根 span 的真实路径（未匹配路由时取 span 属性，其余同 Entry 的路径段）
+	Service        string // 主服务
+	Protocol       string
+	Status         string // SUCCESS / ERROR / CLIENT_ERROR（按状态码兜底后的口径）
+	StatusCode     string
+	StartNS        int64
+	EndNS          int64
+	SpanCount      int64
+	ErrorSpans     int64 // 只含服务端错误
+	ClientErrSpans int64
+	LogCount       int64
+	RootError      int64
 }
 
 // TraceServiceStat 是窗口内按主服务的分布（服务筛选下拉 + 一眼看慢在哪）。
 type TraceServiceStat struct {
-	Service    string
-	Count      int64
-	ErrorCount int64
-	AvgMS      float64
-	MaxMS      float64
+	Service          string
+	Count            int64
+	ErrorCount       int64 // 服务端错误（5xx / gRPC 非 0）
+	ClientErrorCount int64 // 客户端错误（4xx）
+	AvgMS            float64
+	MaxMS            float64
 }
 
 // TracePage 是请求列表的一页 + 按服务的分布。
@@ -130,18 +203,23 @@ func (f TraceFilter) aggregateSQL(withService bool) (string, []any) {
 			MAX(s.end_ns) AS end_ns,
 			COUNT(DISTINCT s.span_id) AS span_count,
 			SUM(CASE WHEN %[1]s THEN 1 ELSE 0 END) AS error_spans,
+			SUM(CASE WHEN %[5]s THEN 1 ELSE 0 END) AS client_error_spans,
 			COALESCE(MAX(CASE WHEN %[4]s THEN s.name END), '') AS entry,
+			COALESCE(MAX(CASE WHEN %[4]s AND s.name = %[6]s THEN %[7]s END), '') AS unmatched_path,
 			COALESCE(MAX(CASE WHEN %[4]s THEN s.service END), '') AS root_service,
 			COALESCE(MAX(CASE WHEN %[4]s THEN s.protocol END), '') AS protocol,
 			COALESCE(MAX(CASE WHEN %[4]s THEN s.status_code END), '') AS status_code,
 			MAX(CASE WHEN %[4]s AND %[1]s THEN 1 ELSE 0 END) AS root_error,
+			MAX(CASE WHEN %[4]s AND %[5]s THEN 1 ELSE 0 END) AS root_client_error,
 			%[2]s AS main_service
 		FROM span s
 		WHERE s.trace_id IN (
 			SELECT DISTINCT r.trace_id FROM span r
 			WHERE %[3]s AND r.start_ns >= ? AND r.start_ns <= ?
 		)
-		GROUP BY s.trace_id`, errorExpr("s"), mainService, requestEntryScope("r"), isEntryExpr("s"))
+		GROUP BY s.trace_id`,
+		errorExpr("s"), mainService, requestEntryScope("r"), isEntryExpr("s"),
+		clientErrorExpr("s"), unmatchedEntryLiteral(), unmatchedPathExpr("s"))
 	return sql, []any{f.Window.FromNS, f.Window.UntilNS}
 }
 
@@ -149,11 +227,17 @@ func (f TraceFilter) aggregateSQL(withService bool) (string, []any) {
 func (f TraceFilter) whereSQL() (string, []any) {
 	conds := []string{"1=1"}
 	var args []any
+	// 三态：服务端错误 / 客户端错误 / 成功（两者都不是）。互斥且覆盖全集。
 	switch strings.ToUpper(f.Status) {
 	case "ERROR":
 		conds = append(conds, "root_error = 1")
+	case "CLIENT_ERROR":
+		conds = append(conds, "root_error = 0 AND root_client_error = 1")
 	case "SUCCESS":
-		conds = append(conds, "root_error = 0")
+		conds = append(conds, "root_error = 0 AND root_client_error = 0")
+	}
+	if f.ExcludeProbes {
+		conds = append(conds, "entry <> "+unmatchedEntryLiteral())
 	}
 	if f.StatusCode != "" {
 		conds = append(conds, "status_code = ?")
@@ -164,8 +248,9 @@ func (f TraceFilter) whereSQL() (string, []any) {
 		args = append(args, f.Service)
 	}
 	if f.Keyword != "" {
-		conds = append(conds, `entry LIKE ? ESCAPE '\'`)
-		args = append(args, likePattern(f.Keyword))
+		conds = append(conds, `(entry LIKE ? ESCAPE '\' OR unmatched_path LIKE ? ESCAPE '\')`)
+		pattern := likePattern(f.Keyword)
+		args = append(args, pattern, pattern)
 	}
 	if f.MinDurationNS > 0 {
 		conds = append(conds, "end_ns - start_ns >= ?")
@@ -179,7 +264,8 @@ func (f TraceFilter) orderSQL() string {
 	case "duration":
 		return "(end_ns - start_ns) DESC, start_ns DESC, trace_id"
 	case "status":
-		return "root_error DESC, start_ns DESC, trace_id"
+		// 服务端错误优先，其次客户端错误，最后成功（“错误优先”仍然成立，但 4xx 不再冒充故障）。
+		return "root_error DESC, root_client_error DESC, start_ns DESC, trace_id"
 	default:
 		return "start_ns DESC, trace_id"
 	}
@@ -221,7 +307,7 @@ func (s *Store) RequestTraces(ctx context.Context, f TraceFilter) (TracePage, er
 		total += n
 
 		if !f.CountOnly {
-			listSQL := "SELECT trace_id, start_ns, end_ns, span_count, error_spans, entry, root_service, protocol, status_code, root_error, main_service FROM (" + agg + ") " + where +
+			listSQL := "SELECT trace_id, start_ns, end_ns, span_count, error_spans, client_error_spans, entry, unmatched_path, root_service, protocol, status_code, root_error, root_client_error, main_service FROM (" + agg + ") " + where +
 				" ORDER BY " + f.orderSQL() + " LIMIT ?"
 			listArgs := append(append(append([]any{}, base...), filterArgs...), want)
 			rs, err := file.db.QueryContext(ctx, listSQL, listArgs...)
@@ -230,18 +316,30 @@ func (s *Store) RequestTraces(ctx context.Context, f TraceFilter) (TracePage, er
 			}
 			for rs.Next() {
 				var r TraceRow
-				var rootService string
-				if err := rs.Scan(&r.TraceID, &r.StartNS, &r.EndNS, &r.SpanCount, &r.ErrorSpans,
-					&r.Entry, &rootService, &r.Protocol, &r.StatusCode, &r.RootError, &r.Service); err != nil {
+				var rootService, unmatchedPath string
+				var rootClientErr int64
+				if err := rs.Scan(&r.TraceID, &r.StartNS, &r.EndNS, &r.SpanCount, &r.ErrorSpans, &r.ClientErrSpans,
+					&r.Entry, &unmatchedPath, &rootService, &r.Protocol, &r.StatusCode, &r.RootError, &rootClientErr, &r.Service); err != nil {
 					_ = rs.Close()
 					return TracePage{}, err
 				}
 				if r.Service == "" {
 					r.Service = rootService
 				}
-				r.Status = "SUCCESS"
-				if r.RootError != 0 {
+				// 真实路径：折叠行用 span 属性里存的原始路径，其余行就是入口名的路径段。
+				r.Path = unmatchedPath
+				if r.Path == "" {
+					if _, p := splitEntryName(r.Entry); p != "" {
+						r.Path = p
+					}
+				}
+				switch {
+				case r.RootError != 0:
 					r.Status = "ERROR"
+				case rootClientErr != 0:
+					r.Status = "CLIENT_ERROR"
+				default:
+					r.Status = "SUCCESS"
 				}
 				if kept, ok := rows[r.TraceID]; ok {
 					keepTraceRow(kept, r)
@@ -261,7 +359,7 @@ func (s *Store) RequestTraces(ctx context.Context, f TraceFilter) (TracePage, er
 		if f.SkipStats {
 			continue
 		}
-		statSQL := "SELECT main_service, COUNT(*), SUM(root_error), AVG(end_ns - start_ns), MAX(end_ns - start_ns) FROM (" + agg + ") " + where +
+		statSQL := "SELECT main_service, COUNT(*), SUM(root_error), SUM(CASE WHEN root_error = 0 AND root_client_error = 1 THEN 1 ELSE 0 END), AVG(end_ns - start_ns), MAX(end_ns - start_ns) FROM (" + agg + ") " + where +
 			" AND main_service <> '' GROUP BY main_service ORDER BY 2 DESC LIMIT 30"
 		statArgs := append(append([]any{}, base...), filterArgs...)
 		srs, err := file.db.QueryContext(ctx, statSQL, statArgs...)
@@ -271,7 +369,7 @@ func (s *Store) RequestTraces(ctx context.Context, f TraceFilter) (TracePage, er
 		for srs.Next() {
 			var st TraceServiceStat
 			var avgNS, maxNS float64
-			if err := srs.Scan(&st.Service, &st.Count, &st.ErrorCount, &avgNS, &maxNS); err != nil {
+			if err := srs.Scan(&st.Service, &st.Count, &st.ErrorCount, &st.ClientErrorCount, &avgNS, &maxNS); err != nil {
 				_ = srs.Close()
 				return TracePage{}, err
 			}
@@ -280,6 +378,7 @@ func (s *Store) RequestTraces(ctx context.Context, f TraceFilter) (TracePage, er
 			if kept, ok := stats[st.Service]; ok {
 				kept.Count += st.Count
 				kept.ErrorCount += st.ErrorCount
+				kept.ClientErrorCount += st.ClientErrorCount
 				// 平均值按条数加权；最大值取大。
 				kept.AvgMS = (kept.AvgMS*float64(kept.Count-st.Count) + st.AvgMS*float64(st.Count)) / float64(kept.Count)
 				if st.MaxMS > kept.MaxMS {
@@ -368,12 +467,19 @@ func keepTraceRow(dst *TraceRow, src TraceRow) {
 	}
 	dst.SpanCount += src.SpanCount
 	dst.ErrorSpans += src.ErrorSpans
+	dst.ClientErrSpans += src.ClientErrSpans
 	dst.RootError += src.RootError
+	if src.Status == "CLIENT_ERROR" && dst.Status == "SUCCESS" {
+		dst.Status = "CLIENT_ERROR"
+	}
 	if dst.RootError != 0 {
 		dst.Status = "ERROR"
 	}
 	if dst.Entry == "" {
 		dst.Entry = src.Entry
+	}
+	if dst.Path == "" {
+		dst.Path = src.Path
 	}
 	if dst.Service == "" {
 		dst.Service = src.Service
@@ -386,7 +492,30 @@ func keepTraceRow(dst *TraceRow, src TraceRow) {
 	}
 }
 
+// splitEntryName 把入口名拆成「方法 + 路径」：HTTP 是 "POST /grpc-gateway/..."，
+// gRPC 直连是 "/proto.x.Y/Z"（没有方法段）。obsdb 只用于回填 TraceRow.Path。
+func splitEntryName(entry string) (method, path string) {
+	if strings.HasPrefix(entry, "/") {
+		return "", entry
+	}
+	if i := strings.IndexByte(entry, ' '); i > 0 {
+		return entry[:i], entry[i+1:]
+	}
+	return "", entry
+}
+
+// sortTraceRows 排序。status 口径：服务端错误 > 客户端错误 > 成功（4xx 不再冒充 5xx 抬到最前）。
+// 未匹配路由的行由前端标识，不在这里改排序（时间轴仍按时间倒序）。
 func sortTraceRows(rows []TraceRow, sortBy string) {
+	rank := func(r TraceRow) int {
+		switch {
+		case r.RootError != 0:
+			return 2
+		case r.Status == "CLIENT_ERROR":
+			return 1
+		}
+		return 0
+	}
 	sort.Slice(rows, func(i, j int) bool {
 		a, b := rows[i], rows[j]
 		switch sortBy {
@@ -396,8 +525,8 @@ func sortTraceRows(rows []TraceRow, sortBy string) {
 				return da > db
 			}
 		case "status":
-			if a.RootError != b.RootError {
-				return a.RootError > b.RootError
+			if ra, rb := rank(a), rank(b); ra != rb {
+				return ra > rb
 			}
 		}
 		if a.StartNS != b.StartNS {
@@ -414,27 +543,32 @@ type RedQuery struct {
 }
 
 // RedPoint 是趋势里的一个桶。
+//
+// ErrorCount 只含服务端错误（5xx / gRPC 非 0），ClientErrorCount 只含 HTTP 4xx；
+// 两者只影响指标语义，分位数/计数的口径不变（4xx 仍算一次请求）。
 type RedPoint struct {
-	StartNS    int64
-	Count      int64
-	ErrorCount int64
-	P95MS      float64
-	P99MS      float64
+	StartNS          int64
+	Count            int64
+	ErrorCount       int64
+	ClientErrorCount int64
+	P95MS            float64
+	P99MS            float64
 }
 
 // RedSeries 是一个入口名字的 RED 汇总 + 趋势。
 type RedSeries struct {
-	Name       string
-	Service    string
-	Protocol   string
-	Count      int64
-	ErrorCount int64
-	AvgMS      float64
-	MaxMS      float64
-	P50MS      float64
-	P95MS      float64
-	P99MS      float64
-	Points     []RedPoint
+	Name             string
+	Service          string
+	Protocol         string
+	Count            int64
+	ErrorCount       int64 // 只含服务端错误（5xx / gRPC 非 0）
+	ClientErrorCount int64 // 只含客户端错误（HTTP 4xx）
+	AvgMS            float64
+	MaxMS            float64
+	P50MS            float64
+	P95MS            float64
+	P99MS            float64
+	Points           []RedPoint
 }
 
 // RedReport 是 RED 页面/概览的一屏数据。
@@ -450,22 +584,24 @@ type RedReport struct {
 // minNS/maxNS 是这一组的精确极值，bucketMinNS/bucketMaxNS 是每个时间桶的精确极值；
 // 分位数靠它们把插值区间收紧到实测范围（见 histogramQuantile）。
 type redAcc struct {
-	count, errs, sumNS int64
-	minNS, maxNS       int64
-	hist               [][]int64 // [时间桶][耗时桶]
-	bucketCount        []int64
-	bucketMinNS        []int64
-	bucketMaxNS        []int64
-	errByBucket        []int64
+	count, errs, clientErrs, sumNS int64
+	minNS, maxNS                   int64
+	hist                           [][]int64 // [时间桶][耗时桶]
+	bucketCount                    []int64
+	bucketMinNS                    []int64
+	bucketMaxNS                    []int64
+	errByBucket                    []int64
+	clientErrByBucket              []int64
 }
 
 func newRedAcc(buckets int) *redAcc {
 	a := &redAcc{
-		hist:        make([][]int64, buckets),
-		bucketCount: make([]int64, buckets),
-		bucketMinNS: make([]int64, buckets),
-		bucketMaxNS: make([]int64, buckets),
-		errByBucket: make([]int64, buckets),
+		hist:              make([][]int64, buckets),
+		bucketCount:       make([]int64, buckets),
+		bucketMinNS:       make([]int64, buckets),
+		bucketMaxNS:       make([]int64, buckets),
+		errByBucket:       make([]int64, buckets),
+		clientErrByBucket: make([]int64, buckets),
 	}
 	for i := range a.hist {
 		a.hist[i] = make([]int64, len(redBoundsMS)+1)
@@ -475,7 +611,7 @@ func newRedAcc(buckets int) *redAcc {
 
 // add 合并一批 SQL 聚合行（同一个 [时间桶, 耗时桶]）。count 恒 >= 1，
 // 所以「此前计数为 0」就是可直接取本行极值的第一行（全局看 a.count，每个时间桶看 bucketCount）。
-func (a *redAcc) add(tb, bucket, count, errs, sumNS, minNS, maxNS int64) {
+func (a *redAcc) add(tb, bucket, count, errs, clientErrs, sumNS, minNS, maxNS int64) {
 	if a.count == 0 {
 		a.minNS, a.maxNS = minNS, maxNS
 	} else {
@@ -488,6 +624,7 @@ func (a *redAcc) add(tb, bucket, count, errs, sumNS, minNS, maxNS int64) {
 	}
 	a.count += count
 	a.errs += errs
+	a.clientErrs += clientErrs
 	a.sumNS += sumNS
 
 	if a.bucketCount[tb] == 0 {
@@ -503,6 +640,7 @@ func (a *redAcc) add(tb, bucket, count, errs, sumNS, minNS, maxNS int64) {
 	a.bucketCount[tb] += count
 	a.hist[tb][bucket] += count
 	a.errByBucket[tb] += errs
+	a.clientErrByBucket[tb] += clientErrs
 }
 
 // redBoundsMS 是耗时直方图的桶上界（毫秒，le 语义），末桶为 +Inf。
@@ -531,6 +669,8 @@ func durationBucketExpr(alias string) string {
 //   - 只统计「请求入口」的根 span（见 requestEntryScope），一次请求一条，QPS 不被内部 RPC 放大；
 //   - count/avg/max 为精确值；p50/p95/p99 由耗时直方图在实测 [min, max] 内
 //     插值估算（见 histogramQuantile），小样本因此退化成「区间内插值」而不是桶边界外推；
+//   - ErrorCount 只含服务端错误（HTTP 5xx / gRPC 非 0），ClientErrorCount 只含 HTTP 4xx；
+//     4xx 仍是一次请求（进 Count 与分位数），只是不算故障；
 //   - 趋势的桶宽由窗口长度决定，桶内 p95/p99 用的是该时间桶自己的 [min, max]。
 func (s *Store) RED(ctx context.Context, q RedQuery) (RedReport, error) {
 	from, until := q.Window.FromNS, q.Window.UntilNS
@@ -569,13 +709,14 @@ func (s *Store) RED(ctx context.Context, q RedQuery) (RedReport, error) {
 			%s AS bucket,
 			COUNT(*) AS c,
 			SUM(CASE WHEN %s THEN 1 ELSE 0 END) AS e,
+			SUM(CASE WHEN %s THEN 1 ELSE 0 END) AS ce,
 			SUM(s.end_ns - s.start_ns) AS sum_ns,
 			MIN(s.end_ns - s.start_ns) AS min_ns,
 			MAX(s.end_ns - s.start_ns) AS max_ns
 		FROM span s
 		WHERE %s AND s.start_ns >= ? AND s.start_ns <= ?
 		GROUP BY s.name, s.service, s.protocol, tb, bucket`,
-		durationBucketExpr("s"), errorExpr("s"), requestEntryScope("s"))
+		durationBucketExpr("s"), errorExpr("s"), clientErrorExpr("s"), requestEntryScope("s"))
 
 	for _, file := range s.all() {
 		rows, err := file.db.QueryContext(ctx, sql, from, bucketNS, from, until)
@@ -584,8 +725,8 @@ func (s *Store) RED(ctx context.Context, q RedQuery) (RedReport, error) {
 		}
 		for rows.Next() {
 			var name, service, protocol string
-			var tb, bucket, count, errs, sumNS, minNS, maxNS int64
-			if err := rows.Scan(&name, &service, &protocol, &tb, &bucket, &count, &errs, &sumNS, &minNS, &maxNS); err != nil {
+			var tb, bucket, count, errs, clientErrs, sumNS, minNS, maxNS int64
+			if err := rows.Scan(&name, &service, &protocol, &tb, &bucket, &count, &errs, &clientErrs, &sumNS, &minNS, &maxNS); err != nil {
 				_ = rows.Close()
 				return RedReport{}, err
 			}
@@ -598,8 +739,8 @@ func (s *Store) RED(ctx context.Context, q RedQuery) (RedReport, error) {
 				a = newRedAcc(buckets)
 				series[key] = a
 			}
-			a.add(tb, bucket, count, errs, sumNS, minNS, maxNS)
-			total.add(tb, bucket, count, errs, sumNS, minNS, maxNS)
+			a.add(tb, bucket, count, errs, clientErrs, sumNS, minNS, maxNS)
+			total.add(tb, bucket, count, errs, clientErrs, sumNS, minNS, maxNS)
 		}
 		if err := rows.Err(); err != nil {
 			_ = rows.Close()
@@ -609,7 +750,8 @@ func (s *Store) RED(ctx context.Context, q RedQuery) (RedReport, error) {
 	}
 
 	build := func(a *redAcc, name, service, protocol string) RedSeries {
-		out := RedSeries{Name: name, Service: service, Protocol: protocol, Count: a.count, ErrorCount: a.errs}
+		out := RedSeries{Name: name, Service: service, Protocol: protocol,
+			Count: a.count, ErrorCount: a.errs, ClientErrorCount: a.clientErrs}
 		if a.count > 0 {
 			out.AvgMS = float64(a.sumNS) / float64(a.count) / 1e6
 		}
@@ -625,11 +767,12 @@ func (s *Store) RED(ctx context.Context, q RedQuery) (RedReport, error) {
 		for i := range a.hist {
 			_, p95, p99 := redQuantiles(a.hist[i], float64(a.bucketMinNS[i])/1e6, float64(a.bucketMaxNS[i])/1e6)
 			out.Points[i] = RedPoint{
-				StartNS:    from + int64(i)*bucketNS,
-				Count:      a.bucketCount[i],
-				ErrorCount: a.errByBucket[i],
-				P95MS:      p95,
-				P99MS:      p99,
+				StartNS:          from + int64(i)*bucketNS,
+				Count:            a.bucketCount[i],
+				ErrorCount:       a.errByBucket[i],
+				ClientErrorCount: a.clientErrByBucket[i],
+				P95MS:            p95,
+				P99MS:            p99,
 			}
 		}
 		return out
