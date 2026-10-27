@@ -12,17 +12,20 @@ FROM ubuntu:24.04
 ARG DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl wget unzip xz-utils git perl \
+        ca-certificates curl wget unzip xz-utils git perl libatomic1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Go 补丁版升上去不影响产物；1.27.2 起修掉 html/template 的 stdlib 漏洞（GO-2026-6599/6600 等）。
-ARG GO_VERSION=1.27.2
+ARG GO_VERSION=1.27.3
 RUN wget -qO /tmp/go.tar.gz "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" \
     && tar -C /usr/local -xzf /tmp/go.tar.gz \
     && rm /tmp/go.tar.gz
 
-ARG NODE_VERSION=24.21.0
-RUN wget -qO /tmp/node.tar.xz "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" \
+ARG NODE_VERSION=26.12.1
+# nodejs.org/dist 在国内经常被重置（镜像构建会卡在这一步），默认走 npmmirror 的二进制镜像；
+# 海外/CI 需要时用 --build-arg NODE_DIST_BASE=https://nodejs.org/dist 覆盖。
+ARG NODE_DIST_BASE=https://cdn.npmmirror.com/binaries/node
+RUN wget -qO /tmp/node.tar.xz "${NODE_DIST_BASE}/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" \
     && tar -C /usr/local --strip-components=1 -xJf /tmp/node.tar.xz \
     && rm /tmp/node.tar.xz \
     && npm config set registry https://registry.npmmirror.com \
