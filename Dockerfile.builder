@@ -29,7 +29,7 @@ RUN wget -qO /tmp/node.tar.xz "${NODE_DIST_BASE}/v${NODE_VERSION}/node-v${NODE_V
     && tar -C /usr/local --strip-components=1 -xJf /tmp/node.tar.xz \
     && rm /tmp/node.tar.xz \
     && npm config set registry https://registry.npmmirror.com \
-    && npm config set fetch-retries 5 \
+    && npm config set fetch-retries 8 \
     && npm config set fetch-retry-mintimeout 20000 \
     && npm config set fetch-retry-maxtimeout 120000 \
     && npm config set fetch-timeout 300000
