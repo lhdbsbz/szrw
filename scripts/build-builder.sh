@@ -12,6 +12,8 @@ BUILDX_NO_DEFAULT_ATTESTATIONS=1 \
     docker buildx build --load \
     --provenance=false --sbom=false \
     --platform linux/amd64 \
+    --build-arg "PROTOC_DIST_BASE=${PROTOC_DIST_BASE:-https://ghfast.top/https://github.com}" \
+    --build-arg "NODE_DIST_BASE=${NODE_DIST_BASE:-https://cdn.npmmirror.com/binaries/node}" \
     -f Dockerfile.builder \
     -t "$TAG" \
     .

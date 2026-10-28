@@ -37,7 +37,11 @@ RUN wget -qO /tmp/node.tar.xz "${NODE_DIST_BASE}/v${NODE_VERSION}/node-v${NODE_V
 # 只装 protoc 本体：google/api/*.proto 这类注解依赖由各项目随仓携带
 # （IDE 只能索引磁盘上的文件，塞进镜像会让编辑器爆红而构建却是绿的）。
 ARG PROTOC_VERSION=36.1
-RUN wget -qO /tmp/protoc.zip "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-x86_64.zip" \
+# github.com 在国内会直接超时（连不上 443，不是慢），和 nodejs.org 是同一个问题，
+# 所以同样留一个 base 参数：默认走 GitHub 加速前缀，海外/CI 用
+# --build-arg PROTOC_DIST_BASE=https://github.com 覆盖。
+ARG PROTOC_DIST_BASE=https://ghfast.top/https://github.com
+RUN wget -qO /tmp/protoc.zip "${PROTOC_DIST_BASE}/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-x86_64.zip" \
     && unzip -q /tmp/protoc.zip -d /usr/local \
     && chmod +x /usr/local/bin/protoc \
     && rm /tmp/protoc.zip
